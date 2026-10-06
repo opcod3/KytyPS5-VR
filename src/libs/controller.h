@@ -18,6 +18,11 @@ struct Lifecycle {
 
 constexpr int HOST_INPUT_CONTROLLER_ID = -1000;
 
+// Fixed handles: the standard pad is 1, the VR2 Sense controllers sit next to it.
+constexpr int PAD_HANDLE_STANDARD            = 1;
+constexpr int PAD_HANDLE_VR_CONTROLLER_LEFT  = 2;
+constexpr int PAD_HANDLE_VR_CONTROLLER_RIGHT = 3;
+
 constexpr uint32_t PAD_BUTTON_L3        = 0x00000002;
 constexpr uint32_t PAD_BUTTON_R3        = 0x00000004;
 constexpr uint32_t PAD_BUTTON_OPTIONS   = 0x00000008;
@@ -53,7 +58,10 @@ struct PadData;
 struct PadVibrationParam;
 struct PadLightBarParam;
 struct PadTriggerEffectParam;
-struct PadTriggerEffectStateInformation;
+struct PadTriggerEffectStateInformation {
+	int32_t state[2];
+};
+struct PadVrControllerData;
 
 inline int controller_get_axis(int min, int max, int value) {
 	int v = (255 * (value - min)) / (max - min);
@@ -99,6 +107,7 @@ int KYTY_SYSV_ABI PadSetTriggerEffect(int handle, const PadTriggerEffectParam* p
 int KYTY_SYSV_ABI PadGetTriggerEffectState(int handle, PadTriggerEffectStateInformation* info);
 int KYTY_SYSV_ABI PadResetLightBar(int handle);
 int KYTY_SYSV_ABI PadSetLightBar(int handle, const PadLightBarParam* param);
+int KYTY_SYSV_ABI PadVrControllerReadState(int handle, PadVrControllerData* data);
 
 } // namespace Libs::Controller
 

@@ -17,6 +17,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <vector>
 
@@ -29,7 +30,6 @@ constexpr int PAD_ERROR_INVALID_HANDLE  = -2137915389; /* 0x80920003 */
 constexpr int PAD_ERROR_ALREADY_OPENED  = -2137915388; /* 0x80920004 */
 constexpr int PAD_ERROR_NOT_INITIALIZED = -2137915387; /* 0x80920005 */
 constexpr int PAD_ERROR_NO_HANDLE       = -2137915384; /* 0x80920008 */
-constexpr int PAD_HANDLE                = 1;
 
 constexpr uint32_t RUMBLE_DURATION_MS = 0xffff;
 constexpr uint32_t RELEASE_FLUSH_MS   = 50;
@@ -71,13 +71,34 @@ struct PadTriggerEffectParam {
 	PadTriggerEffectCommand command[2];
 };
 
-struct PadTriggerEffectStateInformation {
-	int32_t state[2];
-};
-
 static_assert(sizeof(PadTriggerEffectCommand) == 56);
 static_assert(sizeof(PadTriggerEffectParam) == 120);
 static_assert(sizeof(PadTriggerEffectStateInformation) == 8);
+
+struct PadVrControllerData {
+	uint32_t buttons;
+	uint8_t  stick_x;
+	uint8_t  stick_y;
+	uint8_t  stick_padding[2];
+	uint8_t  analog_buttons_l2;
+	uint8_t  analog_buttons_r2;
+	uint8_t  analog_buttons_padding[2];
+	uint32_t finger_touch_detection;
+	uint8_t  analog_finger_touch_detection[4];
+	float    acceleration[3];
+	float    angular_velocity[3];
+	float    orientation[4];
+	uint8_t  reserve1[4];
+	bool     connected;
+	uint8_t  connected_count;
+	uint64_t timestamp;
+	uint8_t  reserve2[24];
+};
+
+static_assert(sizeof(PadVrControllerData) == 104);
+static_assert(offsetof(PadVrControllerData, orientation) == 44);
+static_assert(offsetof(PadVrControllerData, connected) == 64);
+static_assert(offsetof(PadVrControllerData, timestamp) == 72);
 
 struct DualSenseEffects {
 	uint8_t enable_bits;
@@ -154,6 +175,8 @@ private:
 
 	Common::Mutex    m_mutex;
 	PortState        m_port_state      = PortState::Uninitialized;
+	// Open state for the standard pad and the two VR2 Sense controller handles.
+	std::array<bool, 3> m_open_handles {};
 	std::vector<int> m_connected_ids;
 	int              m_active_id       = -1;
 	bool             m_connected       = false;
@@ -939,9 +962,19 @@ int GetActiveControllerId() {
 	return g_controller != nullptr ? g_controller->GetActiveControllerId() : -1;
 }
 
+constexpr int PORT_TYPE_VR_CONTROLLER_LEFT  = 3;
+constexpr int PORT_TYPE_VR_CONTROLLER_RIGHT = 4;
+
+static bool PadIsVrControllerType(int type) {
+	return Config::VrEnabled() &&
+	       (type == PORT_TYPE_VR_CONTROLLER_LEFT || type == PORT_TYPE_VR_CONTROLLER_RIGHT);
+}
+
 static bool PadOpenArgsAreValid(int user_id, int type, int index) {
-	// The host keyboard and gamepad feed one standard port for the configured user.
-	return user_id == Config::GetUserId() && type == 0 && index == 0;
+	// The host keyboard and gamepad feed one standard port for the configured user, and the
+	// VR2 Sense controllers each get their own port when VR is enabled.
+	return user_id == Config::GetUserId() && (type == 0 || PadIsVrControllerType(type)) &&
+	       index == 0;
 }
 
 int GameController::InitPort() {
@@ -952,6 +985,16 @@ int GameController::InitPort() {
 	return OK;
 }
 
+static int PadHandleForType(int type) {
+	if (type == PORT_TYPE_VR_CONTROLLER_LEFT) {
+		return PAD_HANDLE_VR_CONTROLLER_LEFT;
+	}
+	if (type == PORT_TYPE_VR_CONTROLLER_RIGHT) {
+		return PAD_HANDLE_VR_CONTROLLER_RIGHT;
+	}
+	return PAD_HANDLE_STANDARD;
+}
+
 int GameController::OpenPort(int user_id, int type, int index) {
 	Common::LockGuard lock(m_mutex);
 	if (m_port_state == PortState::Uninitialized) {
@@ -960,11 +1003,13 @@ int GameController::OpenPort(int user_id, int type, int index) {
 	if (!PadOpenArgsAreValid(user_id, type, index)) {
 		return PAD_ERROR_INVALID_ARG;
 	}
-	if (m_port_state == PortState::Open) {
+	const int handle = PadHandleForType(type);
+	auto&     open   = m_open_handles[handle - PAD_HANDLE_STANDARD];
+	if (open) {
 		return PAD_ERROR_ALREADY_OPENED;
 	}
-	m_port_state = PortState::Open;
-	return PAD_HANDLE;
+	open = true;
+	return handle;
 }
 
 int GameController::GetPortHandle(int user_id, int type, int index) {
@@ -972,15 +1017,21 @@ int GameController::GetPortHandle(int user_id, int type, int index) {
 	if (m_port_state == PortState::Uninitialized) {
 		return PAD_ERROR_NOT_INITIALIZED;
 	}
-	return m_port_state == PortState::Open && PadOpenArgsAreValid(user_id, type, index) ? PAD_HANDLE
-	                                                                               : PAD_ERROR_NO_HANDLE;
+	if (!PadOpenArgsAreValid(user_id, type, index)) {
+		return PAD_ERROR_NO_HANDLE;
+	}
+	const int handle = PadHandleForType(type);
+	return m_open_handles[handle - PAD_HANDLE_STANDARD] ? handle : PAD_ERROR_NO_HANDLE;
 }
 
 int GameController::CheckPortHandleLocked(int handle) const {
 	if (m_port_state == PortState::Uninitialized) {
 		return PAD_ERROR_NOT_INITIALIZED;
 	}
-	return m_port_state == PortState::Open && handle == PAD_HANDLE ? OK : PAD_ERROR_INVALID_HANDLE;
+	return handle >= PAD_HANDLE_STANDARD && handle <= PAD_HANDLE_VR_CONTROLLER_RIGHT &&
+	               m_open_handles[handle - PAD_HANDLE_STANDARD]
+	           ? OK
+	           : PAD_ERROR_INVALID_HANDLE;
 }
 
 int GameController::CheckPortHandle(int handle) {
@@ -993,7 +1044,7 @@ int GameController::ClosePort(int handle) {
 	if (const auto error = CheckPortHandleLocked(handle); error != OK) {
 		return error;
 	}
-	m_port_state = PortState::Closed;
+	m_open_handles[handle - PAD_HANDLE_STANDARD] = false;
 	return OK;
 }
 
@@ -1238,6 +1289,51 @@ int KYTY_SYSV_ABI PadGetTriggerEffectState(int handle, PadTriggerEffectStateInfo
 	}
 
 	g_controller->GetTriggerEffectState(info);
+
+	return OK;
+}
+
+int KYTY_SYSV_ABI PadVrControllerReadState(int handle, PadVrControllerData* data) {
+	if (handle != PAD_HANDLE_VR_CONTROLLER_LEFT && handle != PAD_HANDLE_VR_CONTROLLER_RIGHT) {
+		return PAD_ERROR_INVALID_HANDLE;
+	}
+	if (const auto error = PadCheckHandle(handle); error != OK) {
+		return error;
+	}
+	if (data == nullptr) {
+		return PAD_ERROR_INVALID_ARG;
+	}
+
+	int             connected_count = 0;
+	bool            connected       = false;
+	ControllerState state;
+
+	g_controller->ReadState(&state, &connected, &connected_count);
+
+	// Each Sense controller takes its half of the host pad: the left one gets the left stick,
+	// L1/L2/L3, triangle and square; the right one gets the rest. Both are always connected
+	// and hold still, since tracking comes from VrTracker2 and not from host motion.
+	constexpr uint32_t left_buttons =
+	    PAD_BUTTON_L1 | PAD_BUTTON_L2 | PAD_BUTTON_L3 | PAD_BUTTON_TRIANGLE | PAD_BUTTON_SQUARE;
+	constexpr uint32_t right_buttons = PAD_BUTTON_R1 | PAD_BUTTON_R2 | PAD_BUTTON_R3 |
+	                                   PAD_BUTTON_CIRCLE | PAD_BUTTON_CROSS | PAD_BUTTON_OPTIONS;
+	const bool left = handle == PAD_HANDLE_VR_CONTROLLER_LEFT;
+
+	std::memset(data, 0, sizeof(*data));
+
+	data->buttons = state.buttons & (left ? left_buttons : right_buttons);
+	data->stick_x = state.axes[static_cast<int>(left ? Axis::LeftX : Axis::RightX)];
+	data->stick_y = state.axes[static_cast<int>(left ? Axis::LeftY : Axis::RightY)];
+	if (left) {
+		data->analog_buttons_l2 = state.axes[static_cast<int>(Axis::TriggerLeft)];
+	} else {
+		data->analog_buttons_r2 = state.axes[static_cast<int>(Axis::TriggerRight)];
+	}
+	data->acceleration[1] = 1.0f;
+	data->orientation[3]  = 1.0f;
+	data->connected       = true;
+	data->connected_count = 1;
+	data->timestamp       = state.time;
 
 	return OK;
 }

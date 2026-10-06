@@ -162,6 +162,75 @@ static int KYTY_SYSV_ABI PadUnknownN3kSX62fgNo(uint64_t arg0, uint64_t arg1, uin
 	return OK;
 }
 
+struct PadVrControllerDeviceInformation {
+	int32_t hand_type;
+	uint8_t stick_dead_zone;
+	uint8_t connection_type;
+	uint8_t connected_count;
+	bool    connected;
+	uint8_t reserve[24];
+};
+
+static_assert(sizeof(PadVrControllerDeviceInformation) == 32);
+
+static bool PadIsVrControllerHandle(int handle) {
+	return handle == Controller::PAD_HANDLE_VR_CONTROLLER_LEFT ||
+	       handle == Controller::PAD_HANDLE_VR_CONTROLLER_RIGHT;
+}
+
+static int KYTY_SYSV_ABI
+PadVrControllerGetDeviceInformation(int handle, PadVrControllerDeviceInformation* info) {
+	constexpr int pad_error_invalid_handle = -2137915389; /* 0x80920003 */
+	constexpr int pad_error_invalid_arg    = -2137915391; /* 0x80920001 */
+	constexpr int hand_type_left           = 1;
+	constexpr int hand_type_right          = 2;
+
+	if (!PadIsVrControllerHandle(handle)) {
+		return pad_error_invalid_handle;
+	}
+	if (info == nullptr) {
+		return pad_error_invalid_arg;
+	}
+
+	std::memset(info, 0, sizeof(*info));
+	info->hand_type       = (handle == Controller::PAD_HANDLE_VR_CONTROLLER_LEFT ? hand_type_left
+	                                                                             : hand_type_right);
+	info->stick_dead_zone = Controller::controller_get_axis(-32768, 32767, 8000) - 128;
+	info->connected_count = 1;
+	info->connected       = true;
+
+	return OK;
+}
+
+static int KYTY_SYSV_ABI PadVrControllerGetTriggerEffectState(
+    int left_handle, int right_handle, Controller::PadTriggerEffectStateInformation* info) {
+	constexpr int pad_error_invalid_handle = -2137915389; /* 0x80920003 */
+
+	if (!PadIsVrControllerHandle(left_handle) || !PadIsVrControllerHandle(right_handle)) {
+		return pad_error_invalid_handle;
+	}
+	if (info == nullptr) {
+		return -2137653243; /* 0x80960005 */
+	}
+
+	info->state[0] = 0;
+	info->state[1] = 0;
+
+	return OK;
+}
+
+static int KYTY_SYSV_ABI PadVrControllerSetTriggerEffects(int left_handle, int right_handle,
+                                                          const void* param) {
+	PRINT_NAME();
+
+	LOGF("\t left_handle  = %d\n"
+	     "\t right_handle = %d\n"
+	     "\t param        = 0x%016" PRIx64 "\n",
+	     left_handle, right_handle, reinterpret_cast<uint64_t>(param));
+
+	return OK;
+}
+
 LIB_DEFINE(InitPad_1) {
 	PRINT_NAME_ENABLE(true);
 
@@ -189,6 +258,10 @@ LIB_DEFINE(InitPad_1) {
 	LIB_FUNC("RR4novUEENY", Controller::PadSetLightBar);
 	LIB_FUNC("6ncge5+l5Qs", Controller::PadClose);
 	LIB_FUNC("n3kSX62fgNo", PadUnknownN3kSX62fgNo);
+	LIB_FUNC("iA-DdobUen8", Controller::PadVrControllerReadState);
+	LIB_FUNC("mbJHDdjhVeY", PadVrControllerGetDeviceInformation);
+	LIB_FUNC("OL2CJ2idmhk", PadVrControllerGetTriggerEffectState);
+	LIB_FUNC("v8P+9PRqg10", PadVrControllerSetTriggerEffects);
 }
 
 namespace LibMouse {

@@ -103,6 +103,7 @@ LIB_DEFINE(InitSystemService_1);
 LIB_DEFINE(InitTextToSpeech2_1);
 LIB_DEFINE(InitUsbd_1);
 LIB_DEFINE(InitUserService_1);
+LIB_DEFINE(InitVrTracker2_1);
 LIB_DEFINE(InitWebBrowserDialog_1);
 
 void InitAll(Loader::SymbolDatabase* s) {
@@ -150,6 +151,7 @@ void InitAll(Loader::SymbolDatabase* s) {
 	VideoDec2::InitVideoDec2_1(s);
 	LibGen5::InitVideoOut_1(s);
 	LibGen5::VrrStatus::InitVideoOutVrrStatus_1(s);
+	InitVrTracker2_1(s);
 	InitWebBrowserDialog_1(s);
 }
 
