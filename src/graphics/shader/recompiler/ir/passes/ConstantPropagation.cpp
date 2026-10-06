@@ -271,6 +271,12 @@ void FoldInstruction(Block& block, Block::iterator instruction,
 			if (source != nullptr && source->GetOpcode() == ValueOpcode::GetBuiltin &&
 			    source->Arg(0) == Value(static_cast<uint32_t>(StageInputKind::PackedAncillary)) &&
 			    IsImmediate(offset, Type::U32) && IsImmediate(count, Type::U32) && count.U32() != 0u) {
+				// Stereo (PSVR2) shaders select the eye with bit 7. Stereo is not emulated, so only
+				// the left eye is rasterized.
+				if (offset.U32() == 7u && count.U32() == 1u) {
+					Replace(inst, Value(0u));
+					return;
+				}
 				constexpr struct {
 					uint32_t       start;
 					uint32_t       end;
