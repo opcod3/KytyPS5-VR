@@ -224,17 +224,95 @@ static int32_t KYTY_SYSV_ABI Hmd2ReprojectionSetTiming(int32_t timing) {
 	return OK;
 }
 
+// A fake device handle handed back by Hmd2Open. There is only one virtual headset.
+constexpr int32_t FAKE_HANDLE = 1;
+
+// Generic success stub for Hmd2 entry points that have no emulated hardware effect. The game
+// only needs a non-error return so VR initialization proceeds; nothing is modeled here yet.
+static int32_t KYTY_SYSV_ABI Hmd2Stub() {
+	PRINT_NAME();
+	return OK;
+}
+
+static int32_t KYTY_SYSV_ABI Hmd2Open() {
+	PRINT_NAME();
+	if (!g_initialized.load()) {
+		return ERROR_NOT_INITIALIZED;
+	}
+	LOGF("Hmd2: open -> handle=%d\n", FAKE_HANDLE);
+	return FAKE_HANDLE;
+}
+
+static int32_t KYTY_SYSV_ABI Hmd2GetFieldOfView([[maybe_unused]] int32_t handle,
+                                                SceHmd2FieldOfView* fov) {
+	PRINT_NAME();
+	if (!g_initialized.load()) {
+		return ERROR_NOT_INITIALIZED;
+	}
+	if (fov == nullptr) {
+		return ERROR_PARAMETER_NULL;
+	}
+	// Same virtual ER15 field of view as the handle-less query.
+	*fov = {1.4281480312f, 0.9163311720f, 1.2437491417f, 1.2437491417f};
+	LOGF("Hmd2: FOV (handle) tangents out=%f in=%f top=%f bottom=%f\n", fov->tanOut, fov->tanIn,
+	     fov->tanTop, fov->tanBottom);
+	return OK;
+}
+
+static Graphics::SizeAlign KYTY_SYSV_ABI Hmd2ReprojectionGetMirroringWorkMemorySizeAlign() {
+	// Mirroring (social-screen) is not emulated; hand back a small, suitably aligned allocation
+	// so the game's buffer bookkeeping succeeds.
+	const Graphics::SizeAlign size {0x1000, 0x100};
+	LOGF("Hmd2: mirroring work size=%" PRIu64 " alignment=%zu\n", size.m_size, size.m_align);
+	return size;
+}
+
+static Graphics::SizeAlign KYTY_SYSV_ABI Hmd2ReprojectionGetMirroringDisplayBufferSizeAlign() {
+	const auto size = ReprojectionDisplaySize();
+	LOGF("Hmd2: mirroring display size=%" PRIu64 " alignment=%zu\n", size.m_size, size.m_align);
+	return size;
+}
+
 } // namespace Hmd2
 
 LIB_DEFINE(InitHmd2_1) {
-	LIB_FUNC("c812oYs7Vsc", Hmd2::Hmd2Initialize);
-	LIB_FUNC("bIi4YUfSRys", Hmd2::Hmd2GetDeviceInformation);
-	LIB_FUNC("gF8+lvc7GuQ", Hmd2::Hmd2GetFieldOfViewWithoutHandle);
-	LIB_FUNC("U-CnbmeyYaA", Hmd2::Hmd2ReprojectionQueryBufferSizeAlign);
-	LIB_FUNC("-C2nkoEYOnU", Hmd2::Hmd2ReprojectionQueryDisplayBufferSizeAlign);
-	LIB_FUNC("C0rPwER-yxg", Hmd2::Hmd2ReprojectionInitialize);
-	LIB_FUNC("VVvFh51o20s", Hmd2::Hmd2ReprojectionEnableVrMode);
-	LIB_FUNC("FkQX7rjFomk", Hmd2::Hmd2ReprojectionSetTiming);
+	// Implemented entry points.
+	LIB_FUNC("c812oYs7Vsc", Hmd2::Hmd2Initialize);                           // sceHmd2Initialize
+	LIB_FUNC("bIi4YUfSRys", Hmd2::Hmd2GetDeviceInformation);                 // sceHmd2GetDeviceInformation
+	LIB_FUNC("gF8+lvc7GuQ", Hmd2::Hmd2GetFieldOfViewWithoutHandle);          // sceHmd2GetFieldOfViewWithoutHandle
+	LIB_FUNC("U-CnbmeyYaA", Hmd2::Hmd2ReprojectionQueryBufferSizeAlign);     // sceHmd2ReprojectionQueryBufferSizeAlign
+	LIB_FUNC("-C2nkoEYOnU", Hmd2::Hmd2ReprojectionQueryDisplayBufferSizeAlign); // sceHmd2ReprojectionQueryDisplayBufferSizeAlign
+	LIB_FUNC("C0rPwER-yxg", Hmd2::Hmd2ReprojectionInitialize);               // sceHmd2ReprojectionInitialize
+	LIB_FUNC("VVvFh51o20s", Hmd2::Hmd2ReprojectionEnableVrMode);             // sceHmd2ReprojectionEnableVrMode
+	LIB_FUNC("FkQX7rjFomk", Hmd2::Hmd2ReprojectionSetTiming);                // sceHmd2ReprojectionSetTiming
+
+	// Stubbed entry points (success return, no emulated effect).
+	LIB_FUNC("f3kPeoTZnIE", Hmd2::Hmd2Open);                                 // sceHmd2Open
+	LIB_FUNC("E+b+c1Idyew", Hmd2::Hmd2GetFieldOfView);                       // sceHmd2GetFieldOfView
+	LIB_FUNC("Pb1d+j-bBSc", Hmd2::Hmd2ReprojectionGetMirroringWorkMemorySizeAlign);    // sceHmd2ReprojectionGetMirroringWorkMemorySizeAlign
+	LIB_FUNC("wEO+gMHs9NU", Hmd2::Hmd2ReprojectionGetMirroringDisplayBufferSizeAlign); // sceHmd2ReprojectionGetMirroringDisplayBufferSizeAlign
+
+	LIB_FUNC("QU2M1pPNbaY", Hmd2::Hmd2Stub);  // sceHmd2Terminate
+	LIB_FUNC("oPhtjySuHa8", Hmd2::Hmd2Stub);  // sceHmd2Close
+	LIB_FUNC("4BlE4IPXP0Q", Hmd2::Hmd2Stub);  // sceHmd2GetDeviceInformationByHandle
+	LIB_FUNC("Acyg4vTdGm0", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionGetCurrentOutput
+	LIB_FUNC("Al4qjNREVQQ", Hmd2::Hmd2Stub);  // sceHmd2SetVibration
+	LIB_FUNC("lAoFUedcfqA", Hmd2::Hmd2Stub);  // sceHmd2GazeGetResult
+	LIB_FUNC("retc+-uRMhk", Hmd2::Hmd2Stub);  // sceHmd2GazeGetResultForFoveatedRendering
+	LIB_FUNC("4Q11W4M2h5Q", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionTerminate
+	LIB_FUNC("xMo9ENEu2E0", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionSetParam
+	LIB_FUNC("DIwqTkcZiJo", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionSetUserEventStart
+	LIB_FUNC("z0+0gXUJWs8", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionClearUserEventStart
+	LIB_FUNC("64ERZWVFBTE", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionSetUserEventEnd
+	LIB_FUNC("rjAd4nCY4DM", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionClearUserEventEnd
+	LIB_FUNC("hA9LshbSkzw", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionSetRenderConfig
+	LIB_FUNC("Ocf081WpBpA", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionBeginFrame
+	LIB_FUNC("SVEG+1D7qHA", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionGetPredictedDisplayTime
+	LIB_FUNC("Qx7SkcgAzok", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionEnableMirroring
+	LIB_FUNC("asilo8VNGvg", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionDisableMirroring
+	LIB_FUNC("+seEJVlljr0", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionSetMirroringOption
+	LIB_FUNC("wj1kOyNF4vM", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionDisableVrMode
+	LIB_FUNC("8GkaY2B7opM", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionGetStatus
 }
 
 } // namespace Libs

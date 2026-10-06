@@ -3121,6 +3121,25 @@ void GraphicsInitJmpTablesCxIndirect() {
 		HwCtxIgnoreObjprimIdControl(value);
 	};
 
+	// Stereo rendering control (used by PSVR2 titles). No stereo pipeline is implemented, so
+	// accept and ignore these registers rather than aborting on an unknown offset.
+	g_hw_ctx_indirect_func[Pm4::PA_STEREO_CNTL] = [](KYTY_HW_CTX_INDIRECT_ARGS) {
+		static std::atomic<uint32_t> log_count {0};
+		if (log_count.fetch_add(1, std::memory_order_relaxed) < 4) {
+			LOGF("\t temporary: ignoring indirect CX PA_STEREO_CNTL at 0x%" PRIx32 " = 0x%08" PRIx32
+			     "\n",
+			     cmd_offset, value);
+		}
+	};
+	g_hw_ctx_indirect_func[Pm4::PA_STATE_STEREO_X] = [](KYTY_HW_CTX_INDIRECT_ARGS) {
+		static std::atomic<uint32_t> log_count {0};
+		if (log_count.fetch_add(1, std::memory_order_relaxed) < 4) {
+			LOGF("\t temporary: ignoring indirect CX PA_STATE_STEREO_X at 0x%" PRIx32 " = 0x%08" PRIx32
+			     "\n",
+			     cmd_offset, value);
+		}
+	};
+
 	for (auto cmd_offset = Pm4::PA_SC_CLIPRECT_RULE; cmd_offset < Pm4::PA_SC_CLIPRECT_0_TL + 8u;
 	     cmd_offset++) {
 		g_hw_ctx_indirect_func[cmd_offset] = [](KYTY_HW_CTX_INDIRECT_ARGS) {
