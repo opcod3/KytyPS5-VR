@@ -1483,6 +1483,40 @@ void TextureCache::MarkGpuWritten(ImageId id) {
 	}
 }
 
+void TextureCache::CopyDepthToColor(ImageId destination_id, ImageId source_id, bool stencil) {
+	std::scoped_lock lock {m_lock};
+	auto&            destination = m_slot_images[destination_id];
+	auto&            source      = m_slot_images[source_id];
+	if (!source.registered || !destination.registered || destination.depth_id ||
+	    !source.info.IsDepth() || destination.info.IsDepth() ||
+	    source.info.extent.width > destination.info.extent.width ||
+	    source.info.extent.height > destination.info.extent.height ||
+	    (stencil && (!source.info.HasStencil() || destination.info.bytes_per_block != 1 ||
+	                 source.backing.samples != 1 || destination.backing.samples != 1))) {
+		EXIT("TextureCache: invalid depth-to-color copy\n");
+	}
+	if (!stencil) {
+		CopyImage(destination_id, source_id);
+		CommitGpuWrite(destination);
+		return;
+	}
+
+	// Image copies drop the stencil aspect, so its packed bytes are staged through a buffer.
+	RefreshCopySource(source_id);
+	TrackImage(destination_id);
+	PrepareImageCopy(destination);
+	const auto&         extent = source.info.extent;
+	vk::BufferImageCopy copy {};
+	copy.imageSubresource = {vk::ImageAspectFlagBits::eStencil, 0, 0, 1};
+	copy.imageExtent      = {extent.width, extent.height, 1};
+	const auto scratch =
+	    m_tiler.GetScratchBuffer(static_cast<uint64_t>(extent.width) * extent.height);
+	source.Download({&copy, 1}, scratch.buffer, scratch.offset, scratch.size);
+	copy.imageSubresource.aspectMask = vk::ImageAspectFlagBits::eColor;
+	destination.Upload({&copy, 1}, scratch.buffer, scratch.offset, scratch.size);
+	CommitGpuWrite(destination);
+}
+
 void TextureCache::CommitGpuWrite(Image& image) {
 	if (!image.depth_id && image.backing.image == nullptr) {
 		EXIT("TextureCache: GPU writes require a native image or stencil association\n");

@@ -10,6 +10,7 @@
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/tile.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
@@ -414,6 +415,37 @@ bool RenderExecutor::DepthStencilCopy(CommandBuffer& buffer) {
 	command.copyImage(source.backing.image, vk::ImageLayout::eTransferSrcOptimal,
 	                  destination.backing.image, vk::ImageLayout::eTransferDstOptimal,
 	                  count, regions.data());
+	return true;
+}
+
+bool RenderExecutor::DepthColorCopy(CommandBuffer& buffer, uint32_t render_target_slice_offset) {
+	const auto& hw = buffer.GetRegisters();
+	const auto& rc = hw.GetRenderControl();
+	if (!rc.copy_depth_to_color && !rc.copy_stencil_to_color) {
+		return false;
+	}
+	const auto& z       = hw.GetDepthRenderTarget();
+	const bool  stencil = rc.copy_stencil_to_color;
+	// The DB replaces pixel exports with depth or stencil values; the draw is treated as a
+	// full-surface copy of one plane.
+	if ((rc.copy_depth_to_color && stencil) || rc.copy_sample != 0 ||
+	    hw.GetColorControl().mode != 1 || z.z_info.format == Prospero::DepthFormat::kInvalid ||
+	    z.z_info.num_samples != 0 ||
+	    (stencil && z.stencil_info.format == Prospero::StencilFormat::kInvalid)) {
+		DepthFatal("unsupported depth-to-color copy state");
+	}
+
+	RenderColorInfo dst {};
+	ResolveRenderColorTarget(buffer, dst, render_target_slice_offset, 0, false, true);
+	auto       read_desc = MakeDepthTargetDesc(buffer, z);
+	auto&      cache     = m_context.GetTextureCache();
+	const auto read_id   = cache.FindImage(read_desc);
+	BindRenderTarget(read_id);
+	if (!dst.image_id || dst.desc.view_info.base_level != 0 || dst.desc.view_info.base_layer != 0 ||
+	    read_desc.view_info.base_layer != 0) {
+		DepthFatal("unsupported depth-to-color copy target");
+	}
+	cache.CopyDepthToColor(dst.image_id, read_id, stencil);
 	return true;
 }
 

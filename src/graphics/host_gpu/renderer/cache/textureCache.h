@@ -63,6 +63,7 @@ public:
 		return image;
 	}
 	void MarkGpuWritten(ImageId id);
+	void CopyDepthToColor(ImageId destination, ImageId source, bool stencil);
 
 	[[nodiscard]] bool ClearImageFromBuffer(CommandBuffer& command, uint64_t address, uint64_t size,
 	                                        uint32_t packed_clear);
