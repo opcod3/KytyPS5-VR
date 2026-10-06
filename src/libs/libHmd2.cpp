@@ -1,12 +1,14 @@
 #include "common/assert.h"
 #include "common/emulatorConfig.h"
 #include "graphics/guest_gpu/tile.h"
+#include "kernel/pthread.h"
 #include "libs/agc.h"
 #include "libs/errno.h"
 #include "libs/hmd2.h"
 #include "libs/libs.h"
 #include "loader/symbolDatabase.h"
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -21,7 +23,9 @@ namespace Hmd2 {
 
 constexpr int32_t ERROR_ALREADY_INITIALIZED = -1972240383; // 0x8a720001
 constexpr int32_t ERROR_NOT_INITIALIZED     = -1972240382; // 0x8a720002
+constexpr int32_t ERROR_HANDLE_INVALID      = -1972240381; // 0x8a720003
 constexpr int32_t ERROR_PARAMETER_NULL      = -1972240376; // 0x8a720008
+constexpr int32_t ERROR_PARAMETER_INVALID   = -1972240375; // 0x8a720009
 constexpr int32_t ERROR_REPROJECTION_ALREADY_INITIALIZED = -1972240372; // 0x8a72000c
 constexpr int32_t ERROR_REPROJECTION_IN_VR_MODE = -1972240356; // 0x8a72001c
 
@@ -69,6 +73,115 @@ struct SceHmd2ReprojectionInitializeParam {
 	uint32_t reserved[5];
 };
 
+struct SceHmd2ReprojectionPoseData {
+	float    position[3];
+	float    orientation[4];
+	uint32_t reserved;
+	uint64_t timestamp;
+	int64_t  flipArg;
+};
+
+struct SceHmd2ReprojectionSettingVr3d {
+	uint32_t                    srcSizeL[2];
+	uint32_t                    srcSizeR[2];
+	uint32_t                    sampler[4];
+	TextureViewport             viewportL;
+	TextureViewport             viewportR;
+	SceHmd2FieldOfView          fovL;
+	SceHmd2FieldOfView          fovR;
+	SceHmd2ReprojectionPoseData pose;
+	uint32_t                    blendType;
+	bool                        disableReprojection;
+	uint8_t                     padding[3];
+	uint32_t                    fsrLutSizeL[2];
+	uint32_t                    fsrLutSizeR[2];
+	uint32_t                    reserved[10];
+	void*                       option;
+};
+
+struct SceHmd2ReprojectionSettingUi2d {
+	uint32_t        srcSize[2];
+	uint32_t        sampler[4];
+	TextureViewport viewport;
+	uint32_t        blendType;
+	float           width;
+	float           height;
+	float           position[3];
+	float           rotation[4];
+	uint32_t        fsrLutSize[2];
+	uint32_t        reserved[10];
+	void*           option;
+};
+
+struct SceHmd2ReprojectionSettingVr2d {
+	uint32_t        srcSize[2];
+	uint32_t        sampler[4];
+	TextureViewport viewport;
+	uint32_t        reserved[10];
+	void*           option;
+};
+
+struct SceHmd2ReprojectionSetting {
+	uint32_t layerType;
+	uint32_t srcId;
+	union {
+		SceHmd2ReprojectionSettingVr3d vr3d;
+		SceHmd2ReprojectionSettingUi2d ui2d;
+		SceHmd2ReprojectionSettingVr2d vr2d;
+		uint32_t                       raw[80];
+	} data;
+};
+
+struct SceHmd2ReprojectionParamOption {
+	uint32_t sizeOfThis;
+	uint32_t multilayerBlendSpaceType;
+	uint32_t reserved[30];
+};
+
+struct SceHmd2ReprojectionParam {
+	const SceHmd2ReprojectionSetting* settings;
+	int32_t                           settingCount;
+	SceHmd2ReprojectionParamOption*   option;
+};
+
+struct SceHmd2GazeVector {
+	float x;
+	float y;
+	float z;
+};
+
+struct SceHmd2GazeGetResultParam {
+	uint32_t sizeOfThis;
+	int32_t  handle;
+	int64_t  flipArg;
+};
+
+struct SceHmd2GazeEyeResult {
+	uint32_t isPupilDiameterValid;
+	float    pupilDiameter;
+	uint32_t isBlink;
+};
+
+struct SceHmd2GazeResult {
+	uint32_t             sizeOfThis;
+	int32_t              status;
+	uint64_t             timestamp;
+	uint32_t             isGazeValid;
+	SceHmd2GazeVector    gazeDirection;
+	SceHmd2GazeEyeResult left;
+	SceHmd2GazeEyeResult right;
+};
+
+struct SceHmd2GazeResultForFoveatedRendering {
+	uint32_t          sizeOfThis;
+	int32_t           status;
+	SceHmd2GazeVector gazeDirection;
+	int32_t           reserved;
+};
+
+constexpr int32_t           GAZE_TRACKING_STATUS_ENABLE = 0;
+constexpr SceHmd2GazeVector GAZE_FORWARD                = {0.0f, 0.0f, -1.0f};
+
 static_assert(sizeof(SceHmd2InitializeParam) == 16);
 static_assert(offsetof(SceHmd2InitializeParam, reserved) == 8);
 static_assert(sizeof(SceHmd2DeviceInformation) == 28);
@@ -84,13 +197,40 @@ static_assert(offsetof(SceHmd2ReprojectionInitializeParam, type) == 32);
 static_assert(offsetof(SceHmd2ReprojectionInitializeParam, pSeeThroughBuff) == 40);
 static_assert(offsetof(SceHmd2ReprojectionInitializeParam, reprojectionTiming) == 48);
 static_assert(offsetof(SceHmd2ReprojectionInitializeParam, reserved) == 52);
+static_assert(sizeof(SceHmd2ReprojectionPoseData) == 48);
+static_assert(sizeof(SceHmd2ReprojectionSettingVr3d) == 216);
+static_assert(offsetof(SceHmd2ReprojectionSettingVr3d, pose) == 96);
+static_assert(offsetof(SceHmd2ReprojectionSettingVr3d, blendType) == 144);
+static_assert(sizeof(SceHmd2ReprojectionSettingUi2d) == 136);
+static_assert(sizeof(SceHmd2ReprojectionSettingVr2d) == 88);
+static_assert(sizeof(SceHmd2ReprojectionSetting) == 328);
+static_assert(offsetof(SceHmd2ReprojectionSetting, data) == 8);
+static_assert(sizeof(SceHmd2ReprojectionParam) == 24);
+static_assert(sizeof(SceHmd2GazeGetResultParam) == 16);
+static_assert(sizeof(SceHmd2GazeResult) == 56);
+static_assert(offsetof(SceHmd2GazeResult, gazeDirection) == 20);
+static_assert(sizeof(SceHmd2GazeResultForFoveatedRendering) == 24);
 
 static std::atomic<bool> g_initialized = false;
 static std::mutex g_reprojection_mutex;
 static std::atomic<ReprojectionState*> g_reprojection_state {nullptr};
+static std::mutex g_frame_settings_mutex;
+static std::array<FrameSettings, REPROJECTION_MAX_DISPLAY_BUFFERS> g_frame_settings {};
 
 ReprojectionState* GetReprojectionState() {
 	return g_reprojection_state.load(std::memory_order_acquire);
+}
+
+bool GetReprojectionFrameSettings(uint32_t index, FrameSettings* settings) {
+	if (index >= REPROJECTION_MAX_DISPLAY_BUFFERS) {
+		return false;
+	}
+	std::scoped_lock lock {g_frame_settings_mutex};
+	if (g_frame_settings[index].count == 0) {
+		return false;
+	}
+	*settings = g_frame_settings[index];
+	return true;
 }
 
 static Graphics::SizeAlign ReprojectionDisplaySize() {
@@ -115,14 +255,7 @@ static int32_t KYTY_SYSV_ABI Hmd2Initialize(const SceHmd2InitializeParam* param)
 	return OK;
 }
 
-static int32_t KYTY_SYSV_ABI Hmd2GetDeviceInformation(SceHmd2DeviceInformation* info) {
-	PRINT_NAME();
-	if (!g_initialized.load()) {
-		return ERROR_NOT_INITIALIZED;
-	}
-	if (info == nullptr) {
-		return ERROR_PARAMETER_NULL;
-	}
+static void FillDeviceInformation(SceHmd2DeviceInformation* info) {
 	*info = {};
 	if (Config::VrEnabled()) {
 		// Virtual headset defaults: READY, MOUNT, 63 mm lens separation.
@@ -135,6 +268,17 @@ static int32_t KYTY_SYSV_ABI Hmd2GetDeviceInformation(SceHmd2DeviceInformation* 
 	} else {
 		info->status = 2; // SCE_HMD2_DEVICE_STATUS_NOT_DETECTED
 	}
+}
+
+static int32_t KYTY_SYSV_ABI Hmd2GetDeviceInformation(SceHmd2DeviceInformation* info) {
+	PRINT_NAME();
+	if (!g_initialized.load()) {
+		return ERROR_NOT_INITIALIZED;
+	}
+	if (info == nullptr) {
+		return ERROR_PARAMETER_NULL;
+	}
+	FillDeviceInformation(info);
 	LOGF("Hmd2: device status=%u panel=%ux%u mounted=%u\n", info->status,
 	     info->deviceInfo.panelResolution.width, info->deviceInfo.panelResolution.height,
 	     info->hmuMount);
@@ -243,6 +387,22 @@ static int32_t KYTY_SYSV_ABI Hmd2Open() {
 	return FAKE_HANDLE;
 }
 
+// Polled every frame, so it does not log.
+static int32_t KYTY_SYSV_ABI Hmd2GetDeviceInformationByHandle(int32_t                   handle,
+                                                              SceHmd2DeviceInformation* info) {
+	if (!g_initialized.load()) {
+		return ERROR_NOT_INITIALIZED;
+	}
+	if (handle != FAKE_HANDLE) {
+		return ERROR_HANDLE_INVALID;
+	}
+	if (info == nullptr) {
+		return ERROR_PARAMETER_NULL;
+	}
+	FillDeviceInformation(info);
+	return OK;
+}
+
 static int32_t KYTY_SYSV_ABI Hmd2GetFieldOfView([[maybe_unused]] int32_t handle,
                                                 SceHmd2FieldOfView* fov) {
 	PRINT_NAME();
@@ -256,6 +416,108 @@ static int32_t KYTY_SYSV_ABI Hmd2GetFieldOfView([[maybe_unused]] int32_t handle,
 	*fov = {1.4281480312f, 0.9163311720f, 1.2437491417f, 1.2437491417f};
 	LOGF("Hmd2: FOV (handle) tangents out=%f in=%f top=%f bottom=%f\n", fov->tanOut, fov->tanIn,
 	     fov->tanTop, fov->tanBottom);
+	return OK;
+}
+
+static int32_t KYTY_SYSV_ABI Hmd2ReprojectionGetPredictedDisplayTime(int64_t   flip_arg,
+                                                                     uint64_t* timestamp) {
+	if (GetReprojectionState() == nullptr) {
+		return ERROR_REPROJECTION_NOT_INITIALIZED;
+	}
+	if (timestamp == nullptr) {
+		return ERROR_PARAMETER_NULL;
+	}
+	// No scan-out is emulated; predict one 120 Hz refresh ahead of now.
+	*timestamp = LibKernel::KernelGetProcessTime() + 1000000 / 120;
+	return OK;
+}
+
+static int32_t KYTY_SYSV_ABI Hmd2GazeGetResult(const SceHmd2GazeGetResultParam* param,
+                                               SceHmd2GazeResult*               result) {
+	if (!g_initialized.load()) {
+		return ERROR_NOT_INITIALIZED;
+	}
+	if (param == nullptr || result == nullptr) {
+		return ERROR_PARAMETER_NULL;
+	}
+	// No eye tracking: a valid gaze straight ahead with open eyes.
+	*result               = {};
+	result->sizeOfThis    = sizeof(SceHmd2GazeResult);
+	result->status        = GAZE_TRACKING_STATUS_ENABLE;
+	result->timestamp     = LibKernel::KernelGetProcessTime();
+	result->isGazeValid   = 1;
+	result->gazeDirection = GAZE_FORWARD;
+	return OK;
+}
+
+static int32_t KYTY_SYSV_ABI Hmd2GazeGetResultForFoveatedRendering(
+    const SceHmd2GazeGetResultParam* param, SceHmd2GazeResultForFoveatedRendering* result) {
+	if (!g_initialized.load()) {
+		return ERROR_NOT_INITIALIZED;
+	}
+	if (param == nullptr || result == nullptr) {
+		return ERROR_PARAMETER_NULL;
+	}
+	*result               = {};
+	result->sizeOfThis    = sizeof(SceHmd2GazeResultForFoveatedRendering);
+	result->status        = GAZE_TRACKING_STATUS_ENABLE;
+	result->gazeDirection = GAZE_FORWARD;
+	return OK;
+}
+
+static bool IsValidLayerBlend(uint32_t blend_type) {
+	return blend_type == LAYER_BLEND_INTERPOLATED_ALPHA ||
+	       blend_type == LAYER_BLEND_PREMULTIPLIED_ALPHA || blend_type == LAYER_BLEND_SIMPLE_ADD ||
+	       blend_type == LAYER_BLEND_LAYER0;
+}
+
+// Records the layer settings for one display buffer; the video-out headset bus composites them
+// when that buffer is flipped. Polled every frame, so it does not log.
+static int32_t KYTY_SYSV_ABI Hmd2ReprojectionSetParam(int32_t index, int64_t flip_arg,
+                                                      const SceHmd2ReprojectionParam* param,
+                                                      void*                           option) {
+	if (GetReprojectionState() == nullptr) {
+		return ERROR_REPROJECTION_NOT_INITIALIZED;
+	}
+	if (param == nullptr || param->settings == nullptr) {
+		return ERROR_PARAMETER_NULL;
+	}
+	if (index < 0 || index >= static_cast<int32_t>(REPROJECTION_MAX_DISPLAY_BUFFERS) ||
+	    param->settingCount < 1 ||
+	    param->settingCount > static_cast<int32_t>(REPROJECTION_MAX_LAYERS) || option != nullptr) {
+		return ERROR_PARAMETER_INVALID;
+	}
+	// Layers are blended on the stored values, which only matches gamma-space blending.
+	EXIT_NOT_IMPLEMENTED(param->option != nullptr && param->option->multilayerBlendSpaceType != 0);
+
+	FrameSettings frame {flip_arg, static_cast<uint32_t>(param->settingCount)};
+	for (uint32_t i = 0; i < frame.count; i++) {
+		const auto& setting = param->settings[i];
+		auto&       layer   = frame.layers[i];
+		layer.layer_type    = setting.layerType;
+		layer.src_id        = setting.srcId;
+		switch (setting.layerType) {
+			case LAYER_TYPE_VR3D:
+				layer.blend_type = setting.data.vr3d.blendType;
+				layer.viewport   = {setting.data.vr3d.viewportL, setting.data.vr3d.viewportR};
+				break;
+			case LAYER_TYPE_UI2D:
+				layer.blend_type = setting.data.ui2d.blendType;
+				layer.viewport   = {setting.data.ui2d.viewport, setting.data.ui2d.viewport};
+				break;
+			case LAYER_TYPE_VR2D:
+				layer.blend_type = LAYER_BLEND_LAYER0;
+				layer.viewport   = {setting.data.vr2d.viewport, setting.data.vr2d.viewport};
+				break;
+			default: return ERROR_PARAMETER_INVALID;
+		}
+		if (layer.src_id >= REPROJECTION_MAX_LAYERS || !IsValidLayerBlend(layer.blend_type)) {
+			return ERROR_PARAMETER_INVALID;
+		}
+	}
+
+	std::scoped_lock lock {g_frame_settings_mutex};
+	g_frame_settings[static_cast<uint32_t>(index)] = frame;
 	return OK;
 }
 
@@ -285,6 +547,11 @@ LIB_DEFINE(InitHmd2_1) {
 	LIB_FUNC("C0rPwER-yxg", Hmd2::Hmd2ReprojectionInitialize);               // sceHmd2ReprojectionInitialize
 	LIB_FUNC("VVvFh51o20s", Hmd2::Hmd2ReprojectionEnableVrMode);             // sceHmd2ReprojectionEnableVrMode
 	LIB_FUNC("FkQX7rjFomk", Hmd2::Hmd2ReprojectionSetTiming);                // sceHmd2ReprojectionSetTiming
+	LIB_FUNC("4BlE4IPXP0Q", Hmd2::Hmd2GetDeviceInformationByHandle);         // sceHmd2GetDeviceInformationByHandle
+	LIB_FUNC("SVEG+1D7qHA", Hmd2::Hmd2ReprojectionGetPredictedDisplayTime);  // sceHmd2ReprojectionGetPredictedDisplayTime
+	LIB_FUNC("lAoFUedcfqA", Hmd2::Hmd2GazeGetResult);                        // sceHmd2GazeGetResult
+	LIB_FUNC("retc+-uRMhk", Hmd2::Hmd2GazeGetResultForFoveatedRendering);    // sceHmd2GazeGetResultForFoveatedRendering
+	LIB_FUNC("xMo9ENEu2E0", Hmd2::Hmd2ReprojectionSetParam);                 // sceHmd2ReprojectionSetParam
 
 	// Stubbed entry points (success return, no emulated effect).
 	LIB_FUNC("f3kPeoTZnIE", Hmd2::Hmd2Open);                                 // sceHmd2Open
@@ -294,20 +561,15 @@ LIB_DEFINE(InitHmd2_1) {
 
 	LIB_FUNC("QU2M1pPNbaY", Hmd2::Hmd2Stub);  // sceHmd2Terminate
 	LIB_FUNC("oPhtjySuHa8", Hmd2::Hmd2Stub);  // sceHmd2Close
-	LIB_FUNC("4BlE4IPXP0Q", Hmd2::Hmd2Stub);  // sceHmd2GetDeviceInformationByHandle
 	LIB_FUNC("Acyg4vTdGm0", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionGetCurrentOutput
 	LIB_FUNC("Al4qjNREVQQ", Hmd2::Hmd2Stub);  // sceHmd2SetVibration
-	LIB_FUNC("lAoFUedcfqA", Hmd2::Hmd2Stub);  // sceHmd2GazeGetResult
-	LIB_FUNC("retc+-uRMhk", Hmd2::Hmd2Stub);  // sceHmd2GazeGetResultForFoveatedRendering
 	LIB_FUNC("4Q11W4M2h5Q", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionTerminate
-	LIB_FUNC("xMo9ENEu2E0", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionSetParam
 	LIB_FUNC("DIwqTkcZiJo", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionSetUserEventStart
 	LIB_FUNC("z0+0gXUJWs8", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionClearUserEventStart
 	LIB_FUNC("64ERZWVFBTE", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionSetUserEventEnd
 	LIB_FUNC("rjAd4nCY4DM", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionClearUserEventEnd
 	LIB_FUNC("hA9LshbSkzw", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionSetRenderConfig
 	LIB_FUNC("Ocf081WpBpA", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionBeginFrame
-	LIB_FUNC("SVEG+1D7qHA", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionGetPredictedDisplayTime
 	LIB_FUNC("Qx7SkcgAzok", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionEnableMirroring
 	LIB_FUNC("asilo8VNGvg", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionDisableMirroring
 	LIB_FUNC("+seEJVlljr0", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionSetMirroringOption

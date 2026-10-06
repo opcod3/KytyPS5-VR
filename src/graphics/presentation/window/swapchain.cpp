@@ -6,10 +6,13 @@
 #include "common/threads.h"
 #include "gpu_blit_shaders/gpu_blit_fs_triangle_spv.h"
 #include "gpu_blit_shaders/gpu_video_out_overlay_spv.h"
+#include "graphics/guest_gpu/tile.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/presentation/hmdCompositor.h"
 #include "graphics/presentation/presenter.h"
 #include "graphics/presentation/systemOverlay.h"
 #include "graphics/presentation/videoOut.h"
@@ -18,6 +21,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cinttypes>
 #include <limits>
 #include <memory>
 #include <vector>
@@ -30,12 +34,15 @@ namespace Libs::Graphics {
 struct Presenter::Frame {
 	VulkanImage   image;
 	vk::ImageView view         = nullptr;
-	uint64_t      present_tick = 0;
-	bool          busy         = false;
-	bool          hdr          = false;
-	bool          blank        = false;
+	uint64_t      present_tick     = 0;
+	bool          busy             = false;
+	bool          hdr              = false;
+	bool          blank            = false;
+	bool          color_attachment = false;
 
-	void Configure(GraphicContext& graphics, vk::Extent2D extent, vk::Format format);
+	// A render-target frame is also drawn into as a color attachment.
+	void Configure(GraphicContext& graphics, vk::Extent2D extent, vk::Format format,
+	               bool render_target = false);
 	void Transit(vk::CommandBuffer command, vk::ImageLayout layout, vk::AccessFlags2 access);
 	void CopyFrom(CommandBuffer& command, Image& source);
 	void Clear(CommandBuffer& command, const vk::ClearColorValue& color);
@@ -149,23 +156,28 @@ private:
 	vk::Format                                     m_format = vk::Format::eUndefined;
 };
 
-void Presenter::Frame::Configure(GraphicContext& graphics, vk::Extent2D extent, vk::Format format) {
+void Presenter::Frame::Configure(GraphicContext& graphics, vk::Extent2D extent, vk::Format format,
+                                 bool render_target) {
 	if (extent.width == 0 || extent.height == 0 || format == vk::Format::eUndefined) {
 		EXIT("unsupported prepared frame, extent=%ux%u format=%d\n", extent.width, extent.height,
 		     static_cast<int>(format));
 	}
 	auto&      dst        = image;
 	const bool compatible = dst.image != nullptr && dst.extent.width == extent.width &&
-	                        dst.extent.height == extent.height && dst.format == format;
+	                        dst.extent.height == extent.height && dst.format == format &&
+	                        (!render_target || color_attachment);
 	if (compatible) {
 		return;
 	}
 
 	const auto features = graphics.GetFormatProperties(format).optimalTilingFeatures;
-	const auto required =
+	auto       required =
 	    vk::FormatFeatureFlagBits::eBlitSrc | vk::FormatFeatureFlagBits::eSampledImageFilterLinear |
 	    vk::FormatFeatureFlagBits::eSampledImage | vk::FormatFeatureFlagBits::eTransferSrc |
 	    vk::FormatFeatureFlagBits::eTransferDst;
+	if (render_target) {
+		required |= vk::FormatFeatureFlagBits::eColorAttachment;
+	}
 	if ((features & required) != required) {
 		EXIT("prepared presentation format lacks optimal blit support: format=%d features=0x%x\n",
 		     static_cast<int>(format), static_cast<vk::FormatFeatureFlags::MaskType>(features));
@@ -188,12 +200,16 @@ void Presenter::Frame::Configure(GraphicContext& graphics, vk::Extent2D extent, 
 	create.initialLayout = vk::ImageLayout::eUndefined;
 	create.usage = vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst |
 	               vk::ImageUsageFlagBits::eSampled;
+	if (render_target) {
+		create.usage |= vk::ImageUsageFlagBits::eColorAttachment;
+	}
 	create.sharingMode = vk::SharingMode::eExclusive;
 	create.samples     = vk::SampleCountFlagBits::e1;
 	if (!graphics.CreateImage(create, dst)) {
 		EXIT("failed to allocate prepared presentation image, extent=%ux%u format=%d\n",
 		     extent.width, extent.height, static_cast<int>(format));
 	}
+	color_attachment = render_target;
 }
 
 void Presenter::Frame::Transit(vk::CommandBuffer command, vk::ImageLayout layout,
@@ -355,6 +371,74 @@ struct Presenter::Impl {
 		cache.UpdateImage(image_id);
 		return image;
 	}
+	// Headset layer textures and FSR tables are single-level color textures, resolved the
+	// same way a shader samples them so they alias the guest's own images.
+	vk::ImageView ResolveHmdTexture(const ShaderTextureResource& texture,
+	                                vk::CommandBuffer            command) {
+		const auto     format = texture.Format();
+		const auto     tile   = texture.TileMode();
+		const auto     type   = texture.Type();
+		const uint32_t width  = static_cast<uint32_t>(texture.Width5()) + 1u;
+		const uint32_t height = static_cast<uint32_t>(texture.Height5()) + 1u;
+		if (texture.IsNull() || texture.BaseLevel() != 0 || texture.LastLevel() != 0 ||
+		    (type != Prospero::ImageType::kColor1D && type != Prospero::ImageType::kColor2D)) {
+			EXIT("unsupported headset layer texture: addr=0x%016" PRIx64
+			     " type=%u levels=%u..%u\n",
+			     texture.Base40(), static_cast<uint32_t>(type), texture.BaseLevel(),
+			     texture.LastLevel());
+		}
+		const auto     surface = TextureGetSurfaceFormatInfo(format);
+		TileSizeAlign  size {};
+		TileSizeOffset level {};
+		TilePaddedSize padded {};
+		TileGetTextureTotalSize(format, width, height, 1, 1, tile, false, size);
+		TileGetTextureSize(format, width, height, 1, tile, nullptr, &level, &padded);
+		EXIT_NOT_IMPLEMENTED(size.size == 0 || Prospero::BlockCompressedBytesPerBlock(format) != 0);
+
+		TextureCache::ImageDesc desc {};
+		desc.info.data            = {texture.Base40(), size.size};
+		desc.info.pixel_format    = surface.vk_format;
+		desc.info.guest_format    = format;
+		desc.info.type            = Prospero::ImageType::kColor2D;
+		desc.info.extent          = {width, height, 1};
+		desc.info.resources       = {1, 1};
+		desc.info.pitch           = TileGetTexturePitch(format, width, tile);
+		desc.info.bytes_per_block = Prospero::NumBytesPerElement(format);
+		desc.info.samples         = 1;
+		desc.info.tile_mode       = tile;
+		desc.info.mip_layout[0]   = {level.src_size != 0 ? level.src_offset : level.offset,
+		                             level.src_size != 0 ? level.src_size : level.size,
+		                             padded.width, padded.height};
+		if (texture.MetaCompress()) {
+			TileSizeAlign metadata_size {};
+			(void)TileGetDccSize(width, height, 1, desc.info.bytes_per_block, 1, tile,
+			                     metadata_size);
+			desc.info.metadata.kind          = ImageMetadataKind::Dcc;
+			desc.info.metadata.range         = {texture.MetaAddr() << 8u, metadata_size.size};
+			desc.info.metadata.dcc_alpha_msb = texture.DccAlphaPos();
+		}
+		desc.view_info.format = surface.vk_format;
+		desc.view_info.type   = vk::ImageViewType::e2D;
+		desc.view_info.mapping =
+		    surface.conversion_format != Prospero::BufferFormat::kInvalid
+		        ? vk::ComponentMapping {}
+		        : TextureGetComponentMapping(texture.DstSelXYZW(), surface.host_to_storage);
+		desc.type = TextureCache::BindingType::Texture;
+
+		auto&      cache = renderer.GetTextureCache();
+		const auto conversion = surface.conversion_format != Prospero::BufferFormat::kInvalid;
+		const auto id         = cache.FindImage(desc, conversion);
+		auto&      image      = cache.GetImage(id);
+		if (image.info.IsDepth() || image.depth_id) {
+			EXIT("headset layer texture aliases a depth target: addr=0x%016" PRIx64 "\n",
+			     texture.Base40());
+		}
+		const auto view     = cache.FindTexture(id, desc);
+		image.usage.texture = true;
+		image.Transit(vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderRead,
+		              {}, command);
+		return view;
+	}
 	void Present();
 	void PresentHmd();
 
@@ -369,6 +453,7 @@ struct Presenter::Impl {
 	// Created on the first headset flip, after its window is shown.
 	std::unique_ptr<Swapchain> hmd_swapchain;
 	Layer                      hmd_layer {};
+	HmdCompositor              hmd_compositor {window.graphic_ctx};
 };
 
 vk::SurfaceKHR Swapchain::Surface() const {
@@ -970,6 +1055,65 @@ Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo
 	frame->Configure(m_impl->window.graphic_ctx,
 	                 {image.backing.extent.width, image.backing.extent.height}, frame_format);
 	frame->CopyFrom(buffer, image);
+	return *frame;
+}
+
+Presenter::Frame& Presenter::PrepareHmdFrame(CommandBuffer&        buffer,
+                                             const HmdComposition& composition) {
+	KYTY_PROFILER_FUNCTION();
+	EXIT_IF(buffer.IsInvalid());
+	EXIT_IF(composition.layer_count == 0 || composition.layer_count > composition.layers.size() ||
+	        composition.width < 2 || composition.height == 0);
+	const vk::Extent2D extent {composition.width, composition.height};
+	const auto         format = m_impl->frames.GetFormat();
+	auto*              frame  = m_impl->frames.Acquire(extent, format);
+	frame->hdr                = false;
+	frame->blank              = false;
+	Common::LockGuard  render_lock(m_impl->renderer.GetMutex());
+	auto&              graphics = m_impl->window.graphic_ctx;
+	frame->Configure(graphics, extent, format, true);
+	buffer.EndRendering();
+	auto command = buffer.Handle();
+
+	// Each eye covers its half of the panel; layer order is blend order.
+	const uint32_t eye_width = composition.width / 2;
+	std::vector<HmdCompositor::Draw> draws;
+	draws.reserve(static_cast<size_t>(composition.layer_count) * 2);
+	for (uint32_t i = 0; i < composition.layer_count; i++) {
+		const auto& layer = composition.layers[i];
+		for (uint32_t eye = 0; eye < 2; eye++) {
+			const auto&          source = layer.eyes[eye];
+			HmdCompositor::Draw draw {};
+			draw.source = m_impl->ResolveHmdTexture(source.texture, command);
+			if (source.fsr) {
+				draw.fsr_lut[0] = m_impl->ResolveHmdTexture(source.fsr_lut[0], command);
+				draw.fsr_lut[1] = m_impl->ResolveHmdTexture(source.fsr_lut[1], command);
+			}
+			draw.target = {{static_cast<int32_t>(eye * eye_width), 0},
+			               {eye_width, composition.height}};
+			const auto width  = static_cast<float>(source.texture.Width5() + 1u);
+			const auto height = static_cast<float>(source.texture.Height5() + 1u);
+			draw.region       = {static_cast<float>(source.x) / width,
+			                     static_cast<float>(source.y) / height,
+			                     static_cast<float>(source.width) / width,
+			                     static_cast<float>(source.height) / height};
+			draw.blend        = layer.blend;
+			draws.push_back(draw);
+		}
+	}
+
+	if (frame->view == nullptr) {
+		vk::ImageViewCreateInfo view {};
+		view.image            = frame->image.image;
+		view.viewType         = vk::ImageViewType::e2D;
+		view.format           = frame->image.format;
+		view.subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+		RequireVulkanSuccess(graphics.device.createImageView(&view, nullptr, &frame->view),
+		                     "create headset frame image view");
+	}
+	frame->Transit(command, vk::ImageLayout::eColorAttachmentOptimal,
+	               vk::AccessFlagBits2::eColorAttachmentWrite);
+	m_impl->hmd_compositor.Record(command, frame->view, format, extent, draws);
 	return *frame;
 }
 

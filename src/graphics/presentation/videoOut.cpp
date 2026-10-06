@@ -19,12 +19,14 @@
 #include "graphics/presentation/renderDoc.h"
 #include "kernel/pthread.h"
 #include "libs/errno.h"
+#include "libs/hmd2.h"
 #include "libs/libs.h"
 #include "loader/systemContent.h"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstring>
 #include <fmt/format.h>
 #include <list>
 #include <thread>
@@ -164,10 +166,69 @@ struct VideoOutBuffers {
 	const void* reserved[2];
 };
 
+// Guest layout of SceHmd2ReprojectionBuffer, the data of a headset display buffer.
+struct Hmd2ReprojectionFsrLut {
+	uint32_t horizontal[8];
+	uint32_t vertical[8];
+	uint32_t reserved[8];
+};
+
+struct Hmd2ReprojectionSource3d {
+	uint32_t               src_l[8];
+	uint32_t               src_r[8];
+	bool                   enable_fsr;
+	uint8_t                padding[3];
+	Hmd2ReprojectionFsrLut fsr_lut_l;
+	Hmd2ReprojectionFsrLut fsr_lut_r;
+	float                  luma_scale_from_sdr_to_hdr;
+	uint32_t               reserved[7];
+};
+
+struct Hmd2ReprojectionSource2d {
+	uint32_t               src[8];
+	bool                   enable_fsr;
+	uint8_t                padding[3];
+	Hmd2ReprojectionFsrLut fsr_lut;
+	float                  luma_scale_from_sdr_to_hdr;
+	uint32_t               reserved[7];
+};
+
+struct Hmd2ReprojectionSource {
+	uint32_t layer_type;
+	union {
+		Hmd2ReprojectionSource3d src3d;
+		Hmd2ReprojectionSource2d src2d;
+		uint32_t                 raw[73];
+	} data;
+	void* option;
+};
+
+struct Hmd2ReprojectionBuffer {
+	const Hmd2ReprojectionSource* src;
+	uint32_t                      src_count;
+};
+
+static_assert(sizeof(Hmd2ReprojectionFsrLut) == 96);
+static_assert(sizeof(Hmd2ReprojectionSource3d) == 292);
+static_assert(sizeof(Hmd2ReprojectionSource) == 304);
+static_assert(offsetof(Hmd2ReprojectionSource, data) == 4);
+static_assert(sizeof(Hmd2ReprojectionBuffer) == 16);
+
+// A reprojection source registered with a headset display buffer, selected by its srcId.
+struct Hmd2Source {
+	uint32_t layer_type = 0;
+	// Left and right eye; a 2D source uses one texture for both.
+	std::array<Graphics::ShaderTextureResource, 2> texture {};
+	// Per eye, the horizontal and vertical FSR resolve tables.
+	std::array<std::array<Graphics::ShaderTextureResource, 2>, 2> fsr_lut {};
+	bool                                                          fsr = false;
+};
+
 struct VideoOutBuffer {
-	int      group_index      = -1;
-	uint64_t data_address     = 0;
-	uint64_t metadata_address = 0;
+	int                     group_index      = -1;
+	uint64_t                data_address     = 0;
+	uint64_t                metadata_address = 0;
+	std::vector<Hmd2Source> hmd2_sources;
 
 	[[nodiscard]] bool Occupied() const noexcept { return group_index >= 0; }
 };
@@ -598,6 +659,71 @@ Graphics::ImageInfo BufferAttributeGroup::ImageInfo(const VideoOutBuffer& buffer
 		EXIT("unsupported normalized video-out format\n");
 	}
 	return info;
+}
+
+static Graphics::Presenter::HmdBlend Hmd2Blend(uint32_t blend_type) {
+	switch (blend_type) {
+		case Hmd2::LAYER_BLEND_INTERPOLATED_ALPHA: return Graphics::Presenter::HmdBlend::Alpha;
+		case Hmd2::LAYER_BLEND_PREMULTIPLIED_ALPHA:
+			return Graphics::Presenter::HmdBlend::PremultipliedAlpha;
+		case Hmd2::LAYER_BLEND_SIMPLE_ADD: return Graphics::Presenter::HmdBlend::Add;
+		default: return Graphics::Presenter::HmdBlend::Opaque;
+	}
+}
+
+// Builds the panel image of a headset flip from the layers sceHmd2ReprojectionSetParam assigned
+// to the buffer. Until it is called, the first source is shown alone, side by side when both
+// eyes share one texture.
+static Graphics::Presenter::HmdComposition Hmd2Composition(const VideoOutBuffer& buffer,
+                                                           int                   index) {
+	const auto&         sources = buffer.hmd2_sources;
+	Hmd2::FrameSettings settings {};
+	if (!Hmd2::GetReprojectionFrameSettings(static_cast<uint32_t>(index), &settings)) {
+		const auto& source  = sources.front();
+		const auto  width   = static_cast<uint32_t>(source.texture[0].Width5()) + 1u;
+		const auto  height  = static_cast<uint32_t>(source.texture[0].Height5()) + 1u;
+		const bool  shared  = source.texture[0].Base40() == source.texture[1].Base40();
+		const auto  eye     = shared ? width / 2 : width;
+		settings.count      = 1;
+		settings.layers[0]  = {
+            source.layer_type,
+            0,
+            Hmd2::LAYER_BLEND_LAYER0,
+            {Hmd2::TextureViewport {eye, height, 0, 0},
+              Hmd2::TextureViewport {eye, height, shared ? eye : 0, 0}},
+        };
+	}
+
+	Graphics::Presenter::HmdComposition composition {};
+	composition.width       = Hmd2::PANEL_WIDTH;
+	composition.height      = Hmd2::PANEL_HEIGHT;
+	composition.layer_count = settings.count;
+	for (uint32_t i = 0; i < settings.count; i++) {
+		const auto& setting = settings.layers[i];
+		if (setting.src_id >= sources.size()) {
+			EXIT("headset layer %u selects unregistered source %u of buffer %d\n", i,
+			     setting.src_id, index);
+		}
+		const auto& source = sources[setting.src_id];
+		// 2D layers are placed in the scene rather than per eye.
+		EXIT_NOT_IMPLEMENTED(setting.layer_type != Hmd2::LAYER_TYPE_VR3D ||
+		                     source.layer_type != Hmd2::LAYER_TYPE_VR3D);
+		auto& layer = composition.layers[i];
+		layer.blend = Hmd2Blend(setting.blend_type);
+		for (uint32_t eye = 0; eye < 2; eye++) {
+			const auto& viewport = setting.viewport[eye];
+			auto&       out      = layer.eyes[eye];
+			out.texture          = source.texture[eye];
+			out.fsr_lut[0]       = source.fsr_lut[eye][0];
+			out.fsr_lut[1]       = source.fsr_lut[eye][1];
+			out.fsr              = source.fsr;
+			out.x                = viewport.x;
+			out.y                = viewport.y;
+			out.width            = viewport.width;
+			out.height           = viewport.height;
+		}
+	}
+	return composition;
 }
 
 VideoOutDriver::VideoOutDriver(uint32_t width, uint32_t height, Graphics::Presenter& presenter)
@@ -1068,6 +1194,8 @@ void FlipQueue::Prepare(uint64_t request_id, Graphics::CommandBuffer& buffer) {
 
 	const bool          special = IsSpecialBufferIndex(index);
 	Graphics::ImageInfo source_info;
+	bool                hmd2 = false;
+	Graphics::Presenter::HmdComposition hmd2_composition;
 	uint32_t            width   = 0;
 	uint32_t            height  = 0;
 	bool                current = false;
@@ -1076,27 +1204,34 @@ void FlipQueue::Prepare(uint64_t request_id, Graphics::CommandBuffer& buffer) {
 	{
 		Common::LockGuard lock(cfg->mutex);
 		current = cfg->opened && !cfg->closing && cfg->generation == generation;
-		if (current && special) {
-			width  = cfg->width;
-			height = cfg->height;
-		} else if (current) {
-			const auto& surface = cfg->buffers[index];
-			if (!surface.Occupied()) {
-				EXIT("cannot prepare flip from an unregistered surface, id=%" PRIu64
-				     " index=%d\n",
-				     request_id, index);
+		if (current) {
+			if (special) {
+				width  = cfg->width;
+				height = cfg->height;
+			} else {
+				const auto& surface = cfg->buffers[index];
+				if (!surface.Occupied()) {
+					EXIT("cannot prepare flip from an unregistered surface, id=%" PRIu64
+					     " index=%d\n",
+					     request_id, index);
+				}
+				if (surface.group_index >= VIDEO_OUT_BUFFER_ATTRIBUTE_NUM_MAX ||
+				    !cfg->groups[surface.group_index].occupied) {
+					EXIT("video-out surface references an unavailable attribute group, id=%" PRIu64
+					     " index=%d group=%d\n",
+					     request_id, index, surface.group_index);
+				}
+				hmd2 = !surface.hmd2_sources.empty();
+				if (hmd2) {
+					hmd2_composition = Hmd2Composition(surface, index);
+				} else {
+					const auto& group   = cfg->groups[surface.group_index];
+					source_info         = group.ImageInfo(surface);
+					hdr = Graphics::IsHdrVideoOutPixelFormat(group.attribute.pixel_format);
+					premultiplied_alpha = (group.attribute.option &
+					                       VIDEO_OUT_BUFFER_ATTRIBUTE_OPTION_ALPHA_PREMULTIPLIED) != 0;
+				}
 			}
-			if (surface.group_index >= VIDEO_OUT_BUFFER_ATTRIBUTE_NUM_MAX ||
-			    !cfg->groups[surface.group_index].occupied) {
-				EXIT("video-out surface references an unavailable attribute group, id=%" PRIu64
-				     " index=%d group=%d\n",
-				     request_id, index, surface.group_index);
-			}
-			const auto& group   = cfg->groups[surface.group_index];
-			source_info         = group.ImageInfo(surface);
-			hdr                 = Graphics::IsHdrVideoOutPixelFormat(group.attribute.pixel_format);
-			premultiplied_alpha = (group.attribute.option &
-			                       VIDEO_OUT_BUFFER_ATTRIBUTE_OPTION_ALPHA_PREMULTIPLIED) != 0;
 		}
 	}
 	if (!current) {
@@ -1119,6 +1254,8 @@ void FlipQueue::Prepare(uint64_t request_id, Graphics::CommandBuffer& buffer) {
 	if (special) {
 		frame = &m_presenter.PrepareBlankFrame(width, height, index == VIDEO_OUT_BUFFER_INDEX_BLACK,
 		                                       &buffer);
+	} else if (hmd2) {
+		frame = &m_presenter.PrepareHmdFrame(buffer, hmd2_composition);
 	} else {
 		frame = &m_presenter.PrepareFrame(buffer, source_info, hdr);
 	}
@@ -1414,23 +1551,49 @@ KYTY_SYSV_ABI int VideoOutAddOutputModeEvent(LibKernel::EventQueue::KernelEqueue
 	return RegisterVideoOutEvent(handle, eq, VideoOutEventKind::OutputMode, udata);
 }
 
-// A headset buffer lists the reprojection source layers for that display buffer. Each layer
-// record starts with its kind, followed by the left-eye texture descriptor. The first stereo
-// layer holds both eyes side by side, so its texture stands in for the display surface.
-static uint64_t Hmd2StereoSurfaceAddress(const void* data) {
-	constexpr uint32_t LAYER_KIND_STEREO = 0x10;
-	struct LayerList {
-		const uint32_t* layers;
-		uint64_t        count;
-	};
-	const auto* list = static_cast<const LayerList*>(data);
-	if (list == nullptr || list->layers == nullptr || list->count == 0 ||
-	    list->layers[0] != LAYER_KIND_STEREO) {
+// A headset buffer lists the reprojection sources composited into that display buffer. The
+// guest list is copied, since it only has to outlive the registration call.
+static std::vector<Hmd2Source> Hmd2ParseSources(const void* data) {
+	const auto* buffer = static_cast<const Hmd2ReprojectionBuffer*>(data);
+	if (buffer == nullptr || buffer->src == nullptr || buffer->src_count == 0 ||
+	    buffer->src_count > Hmd2::REPROJECTION_MAX_LAYERS) {
 		EXIT("unsupported headset video-out buffer layout\n");
 	}
-	const auto* texture = list->layers + 1;
-	return (static_cast<uint64_t>(texture[0]) | (static_cast<uint64_t>(texture[1] & 0xffu) << 32u))
-	       << 8u;
+	auto copy = [](Graphics::ShaderTextureResource& dst, const uint32_t(&src)[8]) {
+		std::memcpy(dst.fields, src, sizeof(dst.fields));
+	};
+	std::vector<Hmd2Source> sources(buffer->src_count);
+	for (uint32_t i = 0; i < buffer->src_count; i++) {
+		const auto& guest  = buffer->src[i];
+		auto&       source = sources[i];
+		source.layer_type  = guest.layer_type;
+		switch (guest.layer_type) {
+			case Hmd2::LAYER_TYPE_VR3D: {
+				const auto& src3d = guest.data.src3d;
+				copy(source.texture[0], src3d.src_l);
+				copy(source.texture[1], src3d.src_r);
+				copy(source.fsr_lut[0][0], src3d.fsr_lut_l.horizontal);
+				copy(source.fsr_lut[0][1], src3d.fsr_lut_l.vertical);
+				copy(source.fsr_lut[1][0], src3d.fsr_lut_r.horizontal);
+				copy(source.fsr_lut[1][1], src3d.fsr_lut_r.vertical);
+				source.fsr = src3d.enable_fsr;
+				break;
+			}
+			case Hmd2::LAYER_TYPE_UI2D:
+			case Hmd2::LAYER_TYPE_VR2D: {
+				const auto& src2d = guest.data.src2d;
+				for (uint32_t eye = 0; eye < 2; eye++) {
+					copy(source.texture[eye], src2d.src);
+					copy(source.fsr_lut[eye][0], src2d.fsr_lut.horizontal);
+					copy(source.fsr_lut[eye][1], src2d.fsr_lut.vertical);
+				}
+				source.fsr = src2d.enable_fsr;
+				break;
+			}
+			default: EXIT("unsupported headset layer type 0x%x\n", guest.layer_type);
+		}
+	}
+	return sources;
 }
 
 KYTY_SYSV_ABI int VideoOutRegisterBuffers2(int handle, int set_index, int buffer_index_start,
@@ -1500,13 +1663,17 @@ KYTY_SYSV_ABI int VideoOutRegisterBuffers2(int handle, int set_index, int buffer
 		}
 		auto       data_address     = reinterpret_cast<uint64_t>(buffers[i].data);
 		const auto metadata_address = reinterpret_cast<uint64_t>(buffers[i].metadata);
+		std::vector<Hmd2Source> hmd2_sources;
 		if (category == VIDEO_OUT_BUFFER_ATTRIBUTE_CATEGORY_HMD2) {
-			data_address = Hmd2StereoSurfaceAddress(buffers[i].data);
+			// The first source's left-eye texture stands in for the display surface.
+			hmd2_sources = Hmd2ParseSources(buffers[i].data);
+			data_address = hmd2_sources.front().texture[0].Base40();
 		}
 		registrations.push_back({
 		    .group_index      = set_index,
 		    .data_address     = data_address,
 		    .metadata_address = metadata_address,
+		    .hmd2_sources     = std::move(hmd2_sources),
 		});
 		(void)group.ImageInfo(registrations.back());
 	}
