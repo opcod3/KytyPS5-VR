@@ -259,7 +259,9 @@ class Swapchain final {
 public:
 	enum class Status : uint8_t { Success, Recreate, SurfaceLost };
 
-	explicit Swapchain(WindowContext& window): m_window(window) {}
+	// Presents to the main window unless a secondary window is given.
+	explicit Swapchain(WindowContext& window, SecondaryWindow* target = nullptr)
+	    : m_window(window), m_target(target) {}
 	~Swapchain();
 	KYTY_CLASS_NO_COPY(Swapchain);
 
@@ -285,11 +287,16 @@ public:
 	}
 
 private:
-	vk::SurfaceFormatKHR SelectFormat();
-	void Destroy();
+	[[nodiscard]] vk::SurfaceKHR             Surface() const;
+	[[nodiscard]] vk::Extent2D               WindowExtent() const;
+	[[nodiscard]] const SurfaceCapabilities& RefreshSurfaceCapabilities();
+	vk::SurfaceFormatKHR                     SelectFormat(const SurfaceCapabilities& surface);
+	void                                     RecreateSurface();
+	void                                     Destroy();
 	void DrawOverlay(vk::CommandBuffer command, const Presenter::Layer& layer);
 
 	WindowContext&   m_window;
+	SecondaryWindow* m_target = nullptr;
 	vk::SwapchainKHR m_handle = nullptr;
 	vk::Format       m_format = vk::Format::eUndefined;
 	std::atomic_bool m_hdr_supported {false};
@@ -349,6 +356,7 @@ struct Presenter::Impl {
 		return image;
 	}
 	void Present();
+	void PresentHmd();
 
 	RenderContext&        renderer;
 	WindowContext&        window;
@@ -358,10 +366,43 @@ struct Presenter::Impl {
 	Common::Mutex         present_mutex;
 	std::array<Layer, 2>  layers {};
 	std::atomic<uint64_t> presented_overlay_revision {0};
+	// Created on the first headset flip, after its window is shown.
+	std::unique_ptr<Swapchain> hmd_swapchain;
+	Layer                      hmd_layer {};
 };
 
-vk::SurfaceFormatKHR Swapchain::SelectFormat() {
-	const auto& formats    = m_window.surface_capabilities.formats;
+vk::SurfaceKHR Swapchain::Surface() const {
+	return m_target != nullptr ? m_target->surface : m_window.surface;
+}
+
+vk::Extent2D Swapchain::WindowExtent() const {
+	if (m_target != nullptr) {
+		Common::LockGuard lock(m_target->mutex);
+		return {m_target->width, m_target->height};
+	}
+	Common::LockGuard lock(m_window.mutex);
+	return {m_window.graphic_ctx.screen_width, m_window.graphic_ctx.screen_height};
+}
+
+const SurfaceCapabilities& Swapchain::RefreshSurfaceCapabilities() {
+	if (m_target != nullptr) {
+		m_target->RefreshSurfaceCapabilities(m_window.graphic_ctx);
+		return m_target->surface_capabilities;
+	}
+	m_window.RefreshSurfaceCapabilities();
+	return m_window.surface_capabilities;
+}
+
+void Swapchain::RecreateSurface() {
+	if (m_target != nullptr) {
+		m_target->RecreateSurface(m_window.graphic_ctx);
+		return;
+	}
+	m_window.RecreateSurface();
+}
+
+vk::SurfaceFormatKHR Swapchain::SelectFormat(const SurfaceCapabilities& surface) {
+	const auto& formats    = surface.formats;
 	auto&       graphics   = m_window.graphic_ctx;
 	const auto  hdr_format = std::ranges::find_if(formats, [&](const auto& candidate) {
 		return candidate.colorSpace == vk::ColorSpaceKHR::eHdr10St2084EXT &&
@@ -397,18 +438,14 @@ vk::SurfaceFormatKHR Swapchain::SelectFormat() {
 void Swapchain::Create() {
 	auto& graphics = m_window.graphic_ctx;
 	EXIT_IF(graphics.device == nullptr);
-	EXIT_IF(m_window.surface == nullptr);
+	EXIT_IF(Surface() == nullptr);
 
 	// Capture the size before querying surface capabilities. If the window changes
 	// during creation, the next presentation will detect the newer size.
-	{
-		Common::LockGuard lock(m_window.mutex);
-		m_window_extent = {graphics.screen_width, graphics.screen_height};
-	}
+	m_window_extent = WindowExtent();
 	EXIT_IF(m_window_extent.width == 0);
 	EXIT_IF(m_window_extent.height == 0);
-	m_window.RefreshSurfaceCapabilities();
-	const auto& surface = m_window.surface_capabilities;
+	const auto& surface = RefreshSurfaceCapabilities();
 	EXIT_NOT_IMPLEMENTED(surface.formats.empty());
 
 	m_extent = surface.capabilities.currentExtent;
@@ -433,7 +470,7 @@ void Swapchain::Create() {
 	        ? vk::CompositeAlphaFlagBitsKHR::eOpaque
 	        : vk::CompositeAlphaFlagBitsKHR::eInherit;
 
-	const auto format = SelectFormat();
+	const auto format = SelectFormat(surface);
 	m_format                      = format.format;
 	const auto swapchain_features = graphics.GetFormatProperties(m_format).optimalTilingFeatures;
 	if (!static_cast<bool>(swapchain_features & vk::FormatFeatureFlagBits::eBlitDst)) {
@@ -443,7 +480,7 @@ void Swapchain::Create() {
 
 	vk::SwapchainCreateInfoKHR create_info {};
 	create_info.sType            = vk::StructureType::eSwapchainCreateInfoKHR;
-	create_info.surface          = m_window.surface;
+	create_info.surface          = Surface();
 	create_info.minImageCount    = image_count;
 	create_info.imageFormat      = format.format;
 	create_info.imageColorSpace  = format.colorSpace;
@@ -582,19 +619,17 @@ void Swapchain::Recreate(bool surface_lost) {
 		// Surface recreation goes through SDL_Vulkan_CreateSurface, which touches the
 		// window's view/layer and must run on the main thread on macOS.
 		EXIT_IF(!SDL_RunOnMainThread(
-		    [](void* window) { static_cast<WindowContext*>(window)->RecreateSurface(); }, &m_window,
+		    [](void* swapchain) { static_cast<Swapchain*>(swapchain)->RecreateSurface(); }, this,
 		    true));
 #else
-		m_window.RecreateSurface();
+		RecreateSurface();
 #endif
 	}
 	Create();
 }
 
 bool Swapchain::NeedsResize() const {
-	Common::LockGuard lock(m_window.mutex);
-	return m_window_extent.width != m_window.graphic_ctx.screen_width ||
-	       m_window_extent.height != m_window.graphic_ctx.screen_height;
+	return m_window_extent != WindowExtent();
 }
 
 Swapchain::Status Swapchain::AcquireNextImage(CommandScheduler& scheduler) {
@@ -994,24 +1029,34 @@ void Presenter::Present(Frame& frame) {
 
 void Presenter::Present(std::span<const Layer> layers) {
 	Common::LockGuard lock(m_impl->present_mutex);
+	bool              present_main = false;
+	bool              present_hmd  = false;
 	for (const auto& layer: layers) {
-		EXIT_IF(layer.bus < 0 || layer.bus >= static_cast<int>(m_impl->layers.size()));
+		const bool hmd = layer.bus == HMD_BUS;
+		EXIT_IF(!hmd && (layer.bus < 0 || layer.bus >= static_cast<int>(m_impl->layers.size())));
 		m_impl->frames.ValidateForPresent(layer.frame);
-		auto& previous = m_impl->layers[layer.bus];
+		auto& previous = hmd ? m_impl->hmd_layer : m_impl->layers[layer.bus];
 		if (previous.frame != nullptr) {
 			m_impl->frames.Release(previous.frame);
 		}
 		previous = layer;
+		present_hmd |= hmd;
+		present_main |= !hmd;
 	}
-	m_impl->Present();
+	if (present_main) {
+		m_impl->Present();
+	}
+	if (present_hmd) {
+		m_impl->PresentHmd();
+	}
 }
 
 void Presenter::ClearLayer(int bus) {
-	if (static_cast<size_t>(bus) >= m_impl->layers.size()) {
+	if (bus != HMD_BUS && static_cast<size_t>(bus) >= m_impl->layers.size()) {
 		return;
 	}
 	Common::LockGuard lock(m_impl->present_mutex);
-	auto& layer = m_impl->layers[bus];
+	auto&             layer = bus == HMD_BUS ? m_impl->hmd_layer : m_impl->layers[bus];
 	if (layer.frame != nullptr) {
 		m_impl->frames.Release(layer.frame);
 		layer = {};
@@ -1061,6 +1106,41 @@ void Presenter::Impl::Present() {
 		return;
 	}
 	LOGF("Vulkan presentation retry exhausted; dropping frame\n");
+}
+
+void Presenter::Impl::PresentHmd() {
+	KYTY_PROFILER_FUNCTION();
+
+	auto* target = window.vr_window.get();
+	EXIT_IF(target == nullptr || hmd_layer.frame == nullptr);
+	if (hmd_swapchain == nullptr) {
+		target->Show();
+		hmd_swapchain = std::make_unique<Swapchain>(window, target);
+		hmd_swapchain->Create();
+	}
+	if (hmd_swapchain->NeedsResize()) {
+		hmd_swapchain->Recreate();
+	}
+	for (uint32_t attempt = 0; attempt < 2; attempt++) {
+		auto status = hmd_swapchain->AcquireNextImage(present_scheduler);
+		if (status != Swapchain::Status::Success) {
+			hmd_swapchain->Recreate(status == Swapchain::Status::SurfaceLost);
+			continue;
+		}
+		{
+			Common::LockGuard render_lock(renderer.GetMutex());
+			auto&             command = present_scheduler.BeginCommand();
+			hmd_swapchain->RecordPresentCommands(command, hmd_layer.frame, {}, false);
+			hmd_layer.frame->present_tick = hmd_swapchain->Submit(present_scheduler);
+		}
+		status = hmd_swapchain->Present();
+		if (status != Swapchain::Status::Success) {
+			hmd_swapchain->Recreate(status == Swapchain::Status::SurfaceLost);
+			continue;
+		}
+		return;
+	}
+	LOGF("Vulkan headset presentation retry exhausted; dropping frame\n");
 }
 
 void Presenter::Discard(Frame& frame) {

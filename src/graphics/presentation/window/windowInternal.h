@@ -30,6 +30,23 @@ struct WindowLoopState {
 	std::atomic<uint64_t> presented_frames {0};
 };
 
+// An additional output window presented with the main window's Vulkan device.
+struct SecondaryWindow {
+	void RefreshSurfaceCapabilities(const GraphicContext& graphics);
+	void RecreateSurface(const GraphicContext& graphics);
+	void Resize(int width, int height);
+	void Show();
+
+	SDL_Window*         window  = nullptr;
+	vk::SurfaceKHR      surface = nullptr;
+	SurfaceCapabilities surface_capabilities;
+	uint32_t            width  = 0;
+	uint32_t            height = 0;
+	std::atomic_bool    shown  = false;
+
+	Common::Mutex mutex;
+};
+
 struct WindowContext {
 	WindowContext();
 	~WindowContext();
@@ -56,7 +73,9 @@ struct WindowContext {
 	SurfaceCapabilities            surface_capabilities;
 	std::unique_ptr<RenderContext> render_context;
 	std::unique_ptr<Presenter>     presenter;
-	WindowLoopState                loop;
+	// Mirror of the PSVR2 headset output; only created in VR mode.
+	std::unique_ptr<SecondaryWindow> vr_window;
+	WindowLoopState                  loop;
 
 	Common::Mutex mutex;
 };

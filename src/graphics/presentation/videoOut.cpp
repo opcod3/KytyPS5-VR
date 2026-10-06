@@ -49,6 +49,7 @@ constexpr int      VIDEO_OUT_FALSE                                      = 0;
 constexpr int      VIDEO_OUT_BUS_TYPE_MAIN                              = 0;
 constexpr int      VIDEO_OUT_BUS_TYPE_OVERLAY                           = 1;
 constexpr int      VIDEO_OUT_BUS_TYPE_SUB                               = 2;
+constexpr int      VIDEO_OUT_BUS_TYPE_HMD2_MAIN                         = 32;
 constexpr int      VIDEO_OUT_FLIP_MODE_VSYNC                            = 1;
 constexpr int      VIDEO_OUT_FLIP_MODE_VSYNC_MULTI                      = 4;
 constexpr int      VIDEO_OUT_FLIP_MODE_SLAVE                            = 8;
@@ -64,6 +65,8 @@ constexpr uint64_t VIDEO_OUT_REFRESH_RATE_59_94HZ                       = 3;
 constexpr uint64_t VIDEO_OUT_REFRESH_RATE_119_88HZ                      = 13;
 constexpr int      VIDEO_OUT_BUFFER_ATTRIBUTE_CATEGORY_UNCOMPRESSED     = 0;
 constexpr int      VIDEO_OUT_BUFFER_ATTRIBUTE_CATEGORY_COMPRESSED       = 1;
+// Headset display buffers use their own category; the surfaces are uncompressed.
+constexpr int      VIDEO_OUT_BUFFER_ATTRIBUTE_CATEGORY_HMD2              = 16;
 constexpr uint64_t VIDEO_OUT_BUFFER_ATTRIBUTE_OPTION_STRICT_COLORIMETRY = 8;
 constexpr uint64_t VIDEO_OUT_BUFFER_ATTRIBUTE_OPTION_ALPHA_PREMULTIPLIED = 32;
 
@@ -247,10 +250,13 @@ private:
 	uint64_t             m_next_request_id = 1;
 };
 
+static_assert(VIDEO_OUT_BUS_TYPE_HMD2_MAIN == Graphics::Presenter::HMD_BUS);
+
 struct VideoOutDriver::Impl {
 public:
-	static constexpr std::array VIDEO_OUT_BUSES {
-	    VIDEO_OUT_BUS_TYPE_MAIN, VIDEO_OUT_BUS_TYPE_OVERLAY, VIDEO_OUT_BUS_TYPE_SUB};
+	static constexpr std::array VIDEO_OUT_BUSES {VIDEO_OUT_BUS_TYPE_MAIN,
+	                                             VIDEO_OUT_BUS_TYPE_OVERLAY, VIDEO_OUT_BUS_TYPE_SUB,
+	                                             VIDEO_OUT_BUS_TYPE_HMD2_MAIN};
 	static constexpr int VIDEO_OUT_NUM_MAX = VIDEO_OUT_BUSES.size() + 1;
 
 	Impl(uint32_t width, uint32_t height, Graphics::Presenter& presenter)
@@ -637,7 +643,9 @@ void VideoOutDriver::Impl::Init(uint32_t width, uint32_t height) {
 
 int VideoOutDriver::Impl::Open(int bus_type, int index) {
 	const auto bus = std::find(VIDEO_OUT_BUSES.begin(), VIDEO_OUT_BUSES.end(), bus_type);
-	if (bus == VIDEO_OUT_BUSES.end()) {
+	// The headset output exists only while a virtual headset is attached.
+	if (bus == VIDEO_OUT_BUSES.end() ||
+	    (bus_type == VIDEO_OUT_BUS_TYPE_HMD2_MAIN && !Config::VrEnabled())) {
 		return VIDEO_OUT_ERROR_INVALID_VALUE;
 	}
 	EXIT_NOT_IMPLEMENTED(index != 0);
@@ -1406,6 +1414,25 @@ KYTY_SYSV_ABI int VideoOutAddOutputModeEvent(LibKernel::EventQueue::KernelEqueue
 	return RegisterVideoOutEvent(handle, eq, VideoOutEventKind::OutputMode, udata);
 }
 
+// A headset buffer lists the reprojection source layers for that display buffer. Each layer
+// record starts with its kind, followed by the left-eye texture descriptor. The first stereo
+// layer holds both eyes side by side, so its texture stands in for the display surface.
+static uint64_t Hmd2StereoSurfaceAddress(const void* data) {
+	constexpr uint32_t LAYER_KIND_STEREO = 0x10;
+	struct LayerList {
+		const uint32_t* layers;
+		uint64_t        count;
+	};
+	const auto* list = static_cast<const LayerList*>(data);
+	if (list == nullptr || list->layers == nullptr || list->count == 0 ||
+	    list->layers[0] != LAYER_KIND_STEREO) {
+		EXIT("unsupported headset video-out buffer layout\n");
+	}
+	const auto* texture = list->layers + 1;
+	return (static_cast<uint64_t>(texture[0]) | (static_cast<uint64_t>(texture[1] & 0xffu) << 32u))
+	       << 8u;
+}
+
 KYTY_SYSV_ABI int VideoOutRegisterBuffers2(int handle, int set_index, int buffer_index_start,
                                            const VideoOutBuffers* buffers, int buffer_num,
                                            const VideoOutBufferAttribute2* attribute, int category,
@@ -1451,7 +1478,9 @@ KYTY_SYSV_ABI int VideoOutRegisterBuffers2(int handle, int set_index, int buffer
 		return VIDEO_OUT_ERROR_INVALID_OPTION;
 	}
 	if (category != VIDEO_OUT_BUFFER_ATTRIBUTE_CATEGORY_UNCOMPRESSED &&
-	    category != VIDEO_OUT_BUFFER_ATTRIBUTE_CATEGORY_COMPRESSED) {
+	    category != VIDEO_OUT_BUFFER_ATTRIBUTE_CATEGORY_COMPRESSED &&
+	    (category != VIDEO_OUT_BUFFER_ATTRIBUTE_CATEGORY_HMD2 ||
+	     ctx->bus != VIDEO_OUT_BUS_TYPE_HMD2_MAIN)) {
 		return VIDEO_OUT_ERROR_INVALID_CATEGORY;
 	}
 
@@ -1469,8 +1498,11 @@ KYTY_SYSV_ABI int VideoOutRegisterBuffers2(int handle, int set_index, int buffer
 			LOGF("\t buffers[%d]: ignoring reserved fields {%p, %p}\n", i, buffers[i].reserved[0],
 			     buffers[i].reserved[1]);
 		}
-		const auto data_address     = reinterpret_cast<uint64_t>(buffers[i].data);
+		auto       data_address     = reinterpret_cast<uint64_t>(buffers[i].data);
 		const auto metadata_address = reinterpret_cast<uint64_t>(buffers[i].metadata);
+		if (category == VIDEO_OUT_BUFFER_ATTRIBUTE_CATEGORY_HMD2) {
+			data_address = Hmd2StereoSurfaceAddress(buffers[i].data);
+		}
 		registrations.push_back({
 		    .group_index      = set_index,
 		    .data_address     = data_address,

@@ -15,6 +15,9 @@ struct WindowContext;
 
 class Presenter final {
 public:
+	// Video-out bus of the PSVR2 headset; its layer is presented to a separate window.
+	static constexpr int HMD_BUS = 32;
+
 	struct Frame;
 	struct Layer {
 		Frame* frame;

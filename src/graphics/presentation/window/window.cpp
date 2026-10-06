@@ -155,7 +155,11 @@ std::unique_ptr<WindowContext> g_window;
 
 } // namespace
 
-constexpr const char* KYTY_SDL_WINDOW_CAPTION = "Game";
+constexpr const char* KYTY_SDL_WINDOW_CAPTION    = "Game";
+constexpr const char* KYTY_SDL_VR_WINDOW_CAPTION = "Game - PSVR2";
+// Half the 4000x2040 headset panel keeps the mirror window on a desktop display.
+constexpr int KYTY_VR_WINDOW_WIDTH  = 2000;
+constexpr int KYTY_VR_WINDOW_HEIGHT = 1020;
 
 static void SetPause(WindowLoopState& game, bool flag) {
 	LOGF("Pause: %s\n", flag ? "true" : "false");
@@ -384,8 +388,36 @@ void WindowContext::Resize(int new_width, int new_height) {
 	graphic_ctx.screen_height = static_cast<uint32_t>(new_height);
 }
 
+void SecondaryWindow::Resize(int new_width, int new_height) {
+	if (new_width <= 0 || new_height <= 0) {
+		return;
+	}
+	Common::LockGuard lock(mutex);
+	width  = static_cast<uint32_t>(new_width);
+	height = static_cast<uint32_t>(new_height);
+}
+
+void SecondaryWindow::Show() {
+	if (shown.exchange(true)) {
+		return;
+	}
+	EXIT_IF(!SDL_RunOnMainThread(
+	    [](void* data) {
+		    auto& secondary = *static_cast<SecondaryWindow*>(data);
+		    SDL_ShowWindow(secondary.window);
+		    int pixel_width  = 0;
+		    int pixel_height = 0;
+		    if (SDL_GetWindowSizeInPixels(secondary.window, &pixel_width, &pixel_height)) {
+			    secondary.Resize(pixel_width, pixel_height);
+		    }
+	    },
+	    this, true));
+}
+
 void WindowContext::ProcessWindowEvent(const SDL_WindowEvent& event) {
 	const auto& window_event = event;
+	const bool  vr_event =
+	    vr_window != nullptr && window_event.windowID == SDL_GetWindowID(vr_window->window);
 	switch (window_event.type) {
 		case SDL_EVENT_WINDOW_SHOWN:
 			LOGF("Window %" PRIu32 " shown\n", window_event.windowID);
@@ -413,7 +445,11 @@ void WindowContext::ProcessWindowEvent(const SDL_WindowEvent& event) {
 			LOGF("Window %" PRIu32 " size changed to %" PRId32 "x%" PRId32 "\n",
 			     window_event.windowID, window_event.data1, window_event.data2);
 
-			Resize(window_event.data1, window_event.data2);
+			if (vr_event) {
+				vr_window->Resize(window_event.data1, window_event.data2);
+			} else {
+				Resize(window_event.data1, window_event.data2);
+			}
 
 			break;
 
@@ -440,6 +476,10 @@ void WindowContext::ProcessWindowEvent(const SDL_WindowEvent& event) {
 			break;
 		case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
 			LOGF("Window %" PRIu32 " closed\n", window_event.windowID);
+			// SDL only sends a quit event when the last window closes.
+			if (vr_window != nullptr && !vr_event) {
+				GameEventQuit(loop);
+			}
 			break;
 		default:
 			LOGF("Window %" PRIu32 " got unknown event %" PRIu32 "\n", window_event.windowID,
@@ -824,6 +864,21 @@ static void WindowCreate(WindowContext& context) {
 	HostInputInit(context.window);
 	InitializeSystemOverlayInput(context.window);
 	context.UpdateIcon();
+
+	if (Config::VrEnabled()) {
+		// Stays hidden until the guest flips to the headset output.
+		auto vr_window    = std::make_unique<SecondaryWindow>();
+		vr_window->window = SDL_CreateWindow(
+		    KYTY_SDL_VR_WINDOW_CAPTION, KYTY_VR_WINDOW_WIDTH, KYTY_VR_WINDOW_HEIGHT,
+		    static_cast<SDL_WindowFlags>(SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE |
+			                             SDL_WINDOW_HIDDEN));
+		if (vr_window->window == nullptr) {
+			EXIT("%s\n", SDL_GetError());
+		}
+		vr_window->width  = KYTY_VR_WINDOW_WIDTH;
+		vr_window->height = KYTY_VR_WINDOW_HEIGHT;
+		context.vr_window = std::move(vr_window);
+	}
 }
 
 uint32_t WindowContext::InitialWindowFlags(bool fullscreen) noexcept {

@@ -1052,6 +1052,16 @@ void WindowContext::CreateVulkan() {
 
 	render_context = std::make_unique<RenderContext>(graphic_ctx);
 	LibKernel::Memory::InstallGpuResources(render_context.get());
+	if (vr_window != nullptr) {
+		vr_window->RecreateSurface(graphic_ctx);
+		vk::Bool32 supported = VK_FALSE;
+		RequireVulkanSuccess(graphic_ctx.physical_device.getSurfaceSupportKHR(
+		                         graphic_ctx.queue_family, vr_window->surface, &supported),
+		                     "vkGetPhysicalDeviceSurfaceSupportKHR");
+		if (supported == VK_FALSE) {
+			EXIT("VR window surface is not supported by the presentation queue\n");
+		}
+	}
 	presenter = std::make_unique<Presenter>(*this);
 }
 
@@ -1074,6 +1084,25 @@ void WindowContext::RecreateSurface() {
 	surface = native_surface;
 }
 
+void SecondaryWindow::RefreshSurfaceCapabilities(const GraphicContext& graphics) {
+	EXIT_IF(graphics.physical_device == nullptr || surface == nullptr);
+	GetSurfaceCapabilities(graphics.physical_device, surface, surface_capabilities);
+}
+
+void SecondaryWindow::RecreateSurface(const GraphicContext& graphics) {
+	EXIT_IF(window == nullptr || graphics.instance == nullptr);
+	if (surface != nullptr) {
+		graphics.instance.destroySurfaceKHR(surface, nullptr);
+		surface = nullptr;
+	}
+	vk::SurfaceKHR::CType native_surface = VK_NULL_HANDLE;
+	if (!SDL_Vulkan_CreateSurface(window, static_cast<vk::Instance::CType>(graphics.instance),
+	                              nullptr, &native_surface)) {
+		EXIT("Could not create the secondary Vulkan surface: %s\n", SDL_GetError());
+	}
+	surface = native_surface;
+}
+
 WindowContext::~WindowContext() {
 	ShutdownSystemOverlayInput();
 	presenter.reset();
@@ -1090,6 +1119,13 @@ WindowContext::~WindowContext() {
 	if (surface != nullptr) {
 		graphic_ctx.instance.destroySurfaceKHR(surface, nullptr);
 		surface = nullptr;
+	}
+	if (vr_window != nullptr) {
+		if (vr_window->surface != nullptr) {
+			graphic_ctx.instance.destroySurfaceKHR(vr_window->surface, nullptr);
+		}
+		SDL_DestroyWindow(vr_window->window);
+		vr_window.reset();
 	}
 	if (graphic_ctx.debug_messenger != nullptr) {
 		graphic_ctx.instance.destroyDebugUtilsMessengerEXT(graphic_ctx.debug_messenger, nullptr);
