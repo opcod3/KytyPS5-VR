@@ -3868,6 +3868,24 @@ void GraphicsInitJmpTablesUcIndirect() {
 			cp.GetUcfg().SetFsrWindow(cmd_offset - Pm4::FSR_WINDOW_LEFT, value);
 		};
 	}
+	// Right-eye foveated-rendering registers, programmed by stereo (PSVR2) titles. Foveation is
+	// not applied per-eye, so accept and ignore these so VR submission does not abort.
+	auto ignore_fsr_right = [](KYTY_HW_UC_INDIRECT_ARGS) {
+		static std::atomic<uint32_t> log_count {0};
+		if (log_count.fetch_add(1, std::memory_order_relaxed) < 8) {
+			LOGF("\t temporary: ignoring right-eye FSR reg 0x%" PRIx32 " = 0x%08" PRIx32 "\n",
+			     cmd_offset, value);
+		}
+	};
+	for (uint32_t i = 0; i < 4; ++i) {
+		g_hw_uc_indirect_func[Pm4::FSR_CONTROL_POINTS_RIGHT_X + i] = ignore_fsr_right;
+		g_hw_uc_indirect_func[Pm4::FSR_CONTROL_POINTS_RIGHT_Y + i] = ignore_fsr_right;
+	}
+	for (uint32_t i = 0; i < 2; ++i) {
+		g_hw_uc_indirect_func[Pm4::FSR_ALPHA_RIGHT_X + i] = ignore_fsr_right;
+		g_hw_uc_indirect_func[Pm4::FSR_ALPHA_RIGHT_Y + i] = ignore_fsr_right;
+		g_hw_uc_indirect_func[Pm4::FSR_WINDOW_RIGHT + i]  = ignore_fsr_right;
+	}
 
 	g_hw_uc_indirect_func[Pm4::GE_CNTL] = [](KYTY_HW_UC_INDIRECT_ARGS) {
 		HW::GeControl r;
