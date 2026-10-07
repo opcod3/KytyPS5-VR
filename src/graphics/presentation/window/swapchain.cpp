@@ -1179,29 +1179,38 @@ bool Presenter::PresentHmdMirror(const HmdMirror& mirror) {
 	return true;
 }
 
-// The part of the left eye shown in a window of the given size: as wide as the area asks, at the
-// window's aspect ratio, centred on the eye's optical axis as far as the eye allows.
+// The part of the left eye a window of the given size shows: a rectangle of the window's aspect
+// ratio, centred on the eye's optical axis. CENTER keeps it inside the circle the lens shows,
+// whose radius is the smallest of the eye's tangents, so masked corners stay out of view. WIDE
+// takes the largest such rectangle inside the image. Sizes are in tangent space, where the
+// rendered image is linear.
 static vk::Rect2D MirrorRect(const Presenter::Frame& frame, vk::Extent2D window,
                              const Presenter::HmdMirror& mirror) {
 	const float eye_width  = static_cast<float>(frame.image.extent.width / 2);
 	const float eye_height = static_cast<float>(frame.image.extent.height);
-	const float aspect     = static_cast<float>(window.width) / static_cast<float>(window.height);
-	float       width      = mirror.center ? eye_width / 2.0f : eye_width;
-	float       height     = width / aspect;
-	if (height > eye_height) {
-		height = eye_height;
-		width  = height * aspect;
+	const auto& fov        = frame.hmd_fov[0];
+	const float across     = fov.tan_out + fov.tan_in;
+	const float down       = fov.tan_top + fov.tan_bottom;
+	if (std::min({fov.tan_out, fov.tan_in, fov.tan_top, fov.tan_bottom}) <= 0.0f) {
+		return {{0, 0}, {static_cast<uint32_t>(eye_width), static_cast<uint32_t>(eye_height)}};
 	}
-	// The image is rectilinear, so tangent 0 sits at tan_out / (tan_out + tan_in) of the width.
-	const auto& fov     = frame.hmd_fov[0];
-	const float across  = fov.tan_out + fov.tan_in;
-	const float down    = fov.tan_top + fov.tan_bottom;
-	const float axis_x  = across > 0.0f ? eye_width * fov.tan_out / across : eye_width / 2.0f;
-	const float axis_y  = down > 0.0f ? eye_height * fov.tan_top / down : eye_height / 2.0f;
-	const float x       = std::clamp(axis_x - width / 2.0f, 0.0f, eye_width - width);
-	const float y       = std::clamp(axis_y - height / 2.0f, 0.0f, eye_height - height);
+	const float aspect = static_cast<float>(window.width) / static_cast<float>(window.height);
+	float       half_width = 0.0f;
+	if (mirror.center) {
+		const float radius = std::min({fov.tan_out, fov.tan_in, fov.tan_top, fov.tan_bottom});
+		half_width         = radius * aspect / std::sqrt(aspect * aspect + 1.0f);
+	} else {
+		half_width = std::min({fov.tan_out, fov.tan_in, std::min(fov.tan_top, fov.tan_bottom) * aspect});
+	}
+	const float half_height = half_width / aspect;
+	// The left eye's temporal side is on the left.
+	const float x_scale = eye_width / across;
+	const float y_scale = eye_height / down;
+	const float x       = (fov.tan_out - half_width) * x_scale;
+	const float y       = (fov.tan_top - half_height) * y_scale;
 	return {{static_cast<int32_t>(x), static_cast<int32_t>(y)},
-	        {static_cast<uint32_t>(width), static_cast<uint32_t>(height)}};
+	        {static_cast<uint32_t>(2.0f * half_width * x_scale),
+	         static_cast<uint32_t>(2.0f * half_height * y_scale)}};
 }
 
 bool Presenter::IsGuestPaused() const noexcept {
@@ -1299,13 +1308,13 @@ void Presenter::Impl::Present(const HmdMirror* mirror) {
 			const bool        draw_system_overlay =
 			    overlay_visual.active && swapchain.PrepareSystemOverlay();
 			auto* source = mirror != nullptr ? hmd_layer.frame : layers[0].frame;
-			vk::Rect2D rect {};
 			if (mirror != nullptr && source != nullptr) {
-				rect = MirrorRect(*source, swapchain.Extent(), *mirror);
+				const auto rect = MirrorRect(*source, swapchain.Extent(), *mirror);
+				swapchain.RecordPresentCommands(command, source, layers[1], draw_system_overlay,
+				                                &rect);
+			} else {
+				swapchain.RecordPresentCommands(command, source, layers[1], draw_system_overlay);
 			}
-			swapchain.RecordPresentCommands(command, source, layers[1], draw_system_overlay,
-			                                mirror != nullptr && source != nullptr ? &rect
-			                                                                       : nullptr);
 			const auto tick = swapchain.Submit(present_scheduler);
 			for (auto* frame: {source, layers[1].frame}) {
 				if (frame != nullptr) {

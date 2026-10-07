@@ -40,9 +40,10 @@ What `--vr-mode openxr` does today:
   the enumerated rate nearest to 89.91 or 119.88 Hz through `XR_FB_display_refresh_rate`
   (`Xr::RequestRefreshRate`). Monado's Qwerty HMD only offers 60 Hz.
 - **Mirroring** (`Hmd2::GetMirroring`, `Presenter::PresentHmdMirror`). With mirroring enabled,
-  the main window shows the left eye of the newest headset panel, cropped to the window's aspect
-  ratio and centred on the eye's optical axis (from the `SetParam` FOV). `WIDE` uses the whole eye
-  width; `CENTER` uses the central half.
+  the main window shows the left eye of the newest headset panel: a rectangle of the window's
+  aspect ratio centred on the eye's optical axis (from the `SetParam` FOV), so it always fills the
+  window. `CENTER` keeps it inside the circle of the smallest eye tangent, clear of the game's lens
+  mask; `WIDE` takes the largest such rectangle inside the image.
 - **Tracking** (`xr/xrTracking.cpp`, `xr/xrClock.cpp`). `sceVrTracker2GetResult` for the HMD and
   controllers, coordinate systems, recentre, `LocateCoordinateSystem` and the play-area calls.
   `sceHmd2GetFieldOfView`, device status, mount state and lens separation come from the runtime.
@@ -61,6 +62,11 @@ Deliberate deviations from the plan below:
 - `panelResolution` stays 4000×2040 rather than the host panel (§4.1). Games are tuned to it, the
   swapchain is created at that size per eye, and Monado accepts it although it exceeds the
   simulated HMD's `maxImageRect`. `vr_force_psvr2_panel` therefore does not exist.
+- `sceHmd2GetFieldOfView` reports the PSVR2's own field of view, not the runtime's (§4.1).
+  Horizon masks what the PSVR2 lenses cannot see with a fixed shape; rendered with Monado's
+  symmetric frustum, that mask blacked out the temporal quarter of each eye. The projection layer
+  carries the frustum the game rendered with, so the runtime still places the image correctly.
+  The runtime's field of view is only logged.
 - The swapchain is fed by a raw `vkCmdCopyImage` from the 8-bit UNORM panel into the matching
   `*_SRGB` format, not by `gpu_hmd_compose.frag` writing through an sRGB view (§4.3). The bits are
   identical, so colour is right without a shader change. This breaks if the presenter's frame
@@ -219,7 +225,7 @@ keep a plausible fake.
 | … `flipToDisplayLatency` | Derived | Average `predictedDisplayTime − xrWaitFrame return time`, in µs, reported in both the 90 Hz and 120 Hz fields. |
 | … `lensSeparationDistance` | Derived | Distance between the two `XrView::pose.position` values in `VIEW` space, in mm. |
 | … `virtualImageDistance` | None | Keep 2.0 m. |
-| `sceHmd2GetFieldOfView[WithoutHandle]` | Derived from `xrLocateViews` | See §5.3. The value is cached from the first located frame. Before that it falls back to the current ER15 constants, because the API "always returns" after init. |
+| `sceHmd2GetFieldOfView[WithoutHandle]` | ~~Derived from `xrLocateViews`~~ Host: PSVR2 ER15 constants | Reporting the runtime's FOV (§5.3) put Horizon's fixed lens mask in view, so the PSVR2 values are reported (§0). The runtime's FOV is logged. |
 | `sceHmd2SetVibration(handle, 0..25 Hz)` | None | No headset haptics in OpenXR. Accept and log once. Optionally a config flag could forward it to both controllers at low amplitude. |
 
 ### 4.2 `libSceHmd2` reprojection (`hmd2/reprojection.h`)
@@ -581,9 +587,9 @@ samples named below.
   tables tuned to its lenses (`SCE_HMD2_FSR_CURVE_LEFT/RIGHT`). `vr_force_psvr2_panel` covers
   sizing. FSR stays unwarped (`e8c7a3d2`), so curve mismatch costs only performance, never
   image correctness.
-- **FOV mismatch.** Rendering with host FOV is right for the image. Games that assume PSVR2
-  tangents for culling or UI placement may look slightly off; nothing beyond reporting real
-  values is planned.
+- **FOV mismatch.** Games are rendered with the PSVR2 FOV (§0), which suits fixed lens masks but
+  renders some pixels a smaller host FOV never shows, and leaves the edges of a wider host FOV
+  black.
 - **VR2D semantics.** These are inferred from the struct shape only (§4.3). Verify on a title.
 - **`flipArg` reuse.** Games use frame counters, so values are unique in practice. Slot and
   space-generation maps should still be bounded rings, not unbounded maps.

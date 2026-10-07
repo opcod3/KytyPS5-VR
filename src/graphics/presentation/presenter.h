@@ -70,7 +70,8 @@ public:
 
 	// Which part of the headset's left eye the main window mirrors.
 	struct HmdMirror {
-		// False: the whole eye width. True: the central half, i.e. magnified.
+		// False: as much of the eye as fills the window. True: only what lies inside the lens
+		// circle, i.e. magnified.
 		bool center = false;
 	};
 

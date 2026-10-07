@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <mutex>
 #include <new>
 
@@ -326,11 +327,17 @@ static int32_t KYTY_SYSV_ABI Hmd2GetDeviceInformation(SceHmd2DeviceInformation* 
 
 // The host headset's field of view, once its first frame has located the views; until then, and
 // with the virtual headset, the ER15 one.
+// Always the PSVR2's field of view, even on a host headset. Games mask what the PSVR2 lenses
+// cannot show with fixed shapes (Horizon Call of the Mountain blacks out the temporal side), so a
+// different frustum puts the mask in view. The projection layer carries the frustum the game
+// rendered with, so the host runtime still shows the image at the right angles.
 static void GetFieldOfView(SceHmd2FieldOfView* fov) {
-	Graphics::Xr::EyeFov host {};
-	if (Graphics::Xr::IsActive() && Graphics::Xr::GetFieldOfView(&host)) {
-		*fov = {host.tan_out, host.tan_in, host.tan_top, host.tan_bottom};
-		return;
+	static std::atomic_flag logged = ATOMIC_FLAG_INIT;
+	Graphics::Xr::EyeFov    host {};
+	if (Graphics::Xr::IsActive() && Graphics::Xr::GetFieldOfView(&host) &&
+	    !logged.test_and_set(std::memory_order_relaxed)) {
+		LOGF("Hmd2: host headset FOV tangents out=%f in=%f top=%f bottom=%f\n", host.tan_out,
+		     host.tan_in, host.tan_top, host.tan_bottom);
 	}
 	*fov = {DEFAULT_FIELD_OF_VIEW.tan_out, DEFAULT_FIELD_OF_VIEW.tan_in,
 	        DEFAULT_FIELD_OF_VIEW.tan_top, DEFAULT_FIELD_OF_VIEW.tan_bottom};
@@ -586,6 +593,14 @@ static int32_t KYTY_SYSV_ABI Hmd2ReprojectionSetParam(int32_t index, int64_t fli
 				for (uint32_t eye = 0; eye < 2; eye++) {
 					const auto& fov = eye == 0 ? setting.data.vr3d.fovL : setting.data.vr3d.fovR;
 					layer.fov[eye]  = {fov.tanOut, fov.tanIn, fov.tanTop, fov.tanBottom};
+				}
+				// Games may render with their own frustum rather than the one GetFieldOfView
+				// reported.
+				if (static FieldOfView logged {}; i == 0 && std::memcmp(&logged, &layer.fov[0],
+				                                                       sizeof(logged)) != 0) {
+					logged = layer.fov[0];
+					LOGF("Hmd2: rendered FOV (left) out=%f in=%f top=%f bottom=%f\n",
+					     logged.tan_out, logged.tan_in, logged.tan_top, logged.tan_bottom);
 				}
 				layer.pose = MakeRenderPose(setting.data.vr3d.pose,
 				                            setting.data.vr3d.disableReprojection);
