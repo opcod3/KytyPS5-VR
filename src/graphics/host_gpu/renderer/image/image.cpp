@@ -33,15 +33,27 @@ namespace {
 [[nodiscard]] vk::ImageCreateFlags ImageCreateFlags(const GraphicContext& graphics,
                                                    const ImageInfo& info) {
 	vk::ImageCreateFlags flags {};
-	if (DepthAspectTransferFormat(info.pixel_format) == vk::Format::eUndefined) {
+	const bool           color = DepthAspectTransferFormat(info.pixel_format) == vk::Format::eUndefined;
+	if (color) {
 		flags |= vk::ImageCreateFlagBits::eMutableFormat;
 		flags |= vk::ImageCreateFlagBits::eExtendedUsage;
-		if (info.IsBlock() && graphics.supports_block_texel_view) {
-			flags |= vk::ImageCreateFlagBits::eBlockTexelViewCompatible;
-		}
 	}
 	if (info.IsVolume()) {
 		flags |= vk::ImageCreateFlagBits::e2DArrayCompatible;
+	}
+	// A block-texel-compatible view lets the guest write compressed blocks through an
+	// uncompressed view. Drivers that advertise the feature still reject it for some images
+	// (notably 3D block-compressed textures), so only request it when the device can actually
+	// create the resulting image; otherwise image creation would abort the emulator.
+	if (color && info.IsBlock() && graphics.supports_block_texel_view) {
+		const auto candidate = flags | vk::ImageCreateFlagBits::eBlockTexelViewCompatible;
+		if (graphics.GetImageFormatProperties(
+		        info.pixel_format, HostImageType(info.type), vk::ImageTiling::eOptimal,
+		        vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferSrc |
+		            vk::ImageUsageFlagBits::eTransferDst,
+		        candidate, nullptr) == vk::Result::eSuccess) {
+			flags = candidate;
+		}
 	}
 	return flags;
 }
