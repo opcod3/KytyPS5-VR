@@ -196,7 +196,7 @@ bool FoldCompositeExtract(Inst& inst, ValueOpcode construct, size_t components) 
 }
 
 void FoldInstruction(Block& block, Block::iterator instruction,
-                      std::unordered_set<Inst*>& lowered_ancillary, uint32_t stereo_eye = 0) {
+                      std::unordered_set<Inst*>& lowered_ancillary, bool stereo = false) {
 	auto& inst = *instruction;
 	switch (inst.GetOpcode()) {
 		case ValueOpcode::StoreBufferU32: {
@@ -271,10 +271,14 @@ void FoldInstruction(Block& block, Block::iterator instruction,
 			if (source != nullptr && source->GetOpcode() == ValueOpcode::GetBuiltin &&
 			    source->Arg(0) == Value(static_cast<uint32_t>(StageInputKind::PackedAncillary)) &&
 			    IsImmediate(offset, Type::U32) && IsImmediate(count, Type::U32) && count.U32() != 0u) {
-				// Stereo (PSVR2) shaders select the eye with bit 7. Each eye is rasterized by its
-				// own shader variant, so the bit is constant.
+				// Stereo (PSVR2) shaders select the eye with ancillary bit 7. A mono draw folds it
+				// to eye 0; a stereo-dynamic variant leaves the read live so it resolves to the eye
+				// pushed at draw time (see EmitBuiltinU32 for PackedAncillary), letting one variant
+				// rasterize both eyes.
 				if (offset.U32() == 7u && count.U32() == 1u) {
-					Replace(inst, Value(stereo_eye));
+					if (!stereo) {
+						Replace(inst, Value(0u));
+					}
 					return;
 				}
 				constexpr struct {
@@ -810,13 +814,13 @@ private:
 
 } // namespace
 
-void ConstantPropagationPass(const BlockList& blocks, uint32_t wave_size, uint32_t stereo_eye) {
+void ConstantPropagationPass(const BlockList& blocks, uint32_t wave_size, bool stereo) {
 	std::unordered_set<Inst*> lowered_ancillary;
 	LaneMaskProjection mask_projection(lowered_ancillary);
 	for (auto* block: blocks) {
 		for (auto inst = block->begin(); inst != block->end(); ++inst) {
 			if (wave_size == 32u) mask_projection.Fold(*inst);
-			FoldInstruction(*block, inst, lowered_ancillary, stereo_eye);
+			FoldInstruction(*block, inst, lowered_ancillary, stereo);
 		}
 	}
 	// Normalize retained PHI/select values only after every supported field read has

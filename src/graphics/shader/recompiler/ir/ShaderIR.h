@@ -324,6 +324,11 @@ struct PushData {
 	static constexpr uint32_t DwordCount = 32;
 	static constexpr uint32_t MeshDrawDwordCount = 6;
 	static constexpr uint32_t NoStart    = UINT32_MAX;
+	// A stereo (PSVR2) draw rasterizes both eyes from one shader variant, selecting the eye at
+	// draw time through this reserved, stage-independent push-constant dword instead of baking it
+	// into a per-eye variant. It sits at the very end of the block so it never overlaps the SRT
+	// shader data packed up from the start; pipeline assembly asserts that it does not.
+	static constexpr uint32_t StereoEyeDword = DwordCount - 1;
 	std::array<uint32_t, DwordCount> dwords {};
 
 	[[nodiscard]] static constexpr bool CanFit(uint32_t start, uint32_t size) {
@@ -440,6 +445,10 @@ struct Bindings {
 	uint32_t push_data_start_dword = PushData::NoStart;
 	uint32_t dispatch_thread_dword = PushData::NoStart;
 	uint32_t memory_offset_dword = 0;
+	// Set when the shader selects the stereo eye dynamically (reads the ancillary eye bit, or
+	// exports a right-eye position). Such a shader reads PushData::StereoEyeDword at runtime and
+	// is compiled as a single variant shared by both eyes.
+	bool     uses_stereo_eye = false;
 
 	[[nodiscard]] uint32_t ShaderDataDwords() const {
 		return memory_offset_dword +

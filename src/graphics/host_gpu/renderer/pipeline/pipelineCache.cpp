@@ -646,7 +646,7 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
     const HW::ShaderRegisters& sh, const HW::Context& context, const HW::UserConfig& user_config,
     std::span<const Prospero::ColorComponentMapping, 8> target_export_mapping, bool pixel_active,
     std::array<ShaderVertexInputInfo, 3>& vertex_info, ShaderPixelInputInfo& pixel_info,
-    uint32_t stereo_eye) {
+    bool stereo) {
 	const bool tess_active = user_config.GetPrimType() == Prospero::PrimitiveType::kPatch;
 	std::array<ShaderParams, 3> vertex_params;
 	if (tess_active) {
@@ -718,26 +718,34 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 			}
 		}
 	}
-	if (stereo_eye != 0) {
-		// The right-eye primitive comes from the last vertex stage's MISC export.
+	if (stereo) {
+		// One shared variant rasterizes both eyes, taking the right eye's X from the last vertex
+		// stage's MISC export and selecting it with the eye pushed at draw time.
 		EXIT_NOT_IMPLEMENTED(tess_active || mesh_active);
-		vertex_info[0].stereo_eye = stereo_eye;
-		pixel_info.stereo_eye     = stereo_eye;
+		vertex_info[0].stereo = true;
+		pixel_info.stereo     = true;
 	}
 	if (context.GetClipControl().clip_disable) {
-		const auto  slot     = stereo_eye * context.GetStereoControl().viewport_id_offset;
-		const auto& viewport = context.GetScreenViewport().viewports[slot];
-		const auto& limits   = m_graphics.GetPhysicalDeviceProperties().limits;
-		auto&       clip     = vertex_info[tess_active ? 2u : 0u].clip_space;
-		clip.scale[0]        = viewport.xscale;
-		clip.scale[1]        = viewport.yscale;
-		clip.offset[0]       = viewport.xoffset;
-		clip.offset[1]       = viewport.yoffset;
-		clip.half_extent[0] =
-		    static_cast<float>(std::min(limits.maxViewportDimensions[0], 16384u)) * 0.5f;
-		clip.half_extent[1] =
-		    static_cast<float>(std::min(limits.maxViewportDimensions[1], 16384u)) * 0.5f;
-		clip.enabled = true;
+		const auto& limits = m_graphics.GetPhysicalDeviceProperties().limits;
+		const auto  bake   = [&](uint32_t slot, ShaderClipSpaceTransform& clip) {
+            const auto& viewport = context.GetScreenViewport().viewports[slot];
+            clip.scale[0]        = viewport.xscale;
+            clip.scale[1]        = viewport.yscale;
+            clip.offset[0]       = viewport.xoffset;
+            clip.offset[1]       = viewport.yoffset;
+            clip.half_extent[0] =
+                static_cast<float>(std::min(limits.maxViewportDimensions[0], 16384u)) * 0.5f;
+            clip.half_extent[1] =
+                static_cast<float>(std::min(limits.maxViewportDimensions[1], 16384u)) * 0.5f;
+            clip.enabled = true;
+		};
+		auto& clip_stage = vertex_info[tess_active ? 2u : 0u];
+		// The left eye uses viewport slot 0; the stereo right-eye X overwrites it from the right
+		// slot's transform.
+		bake(0, clip_stage.clip_space);
+		if (stereo) {
+			bake(context.GetStereoControl().viewport_id_offset, clip_stage.stereo_clip_space);
+		}
 	}
 	uint32_t          push_data_cursor =
 	    mesh_active ? ShaderRecompiler::IR::PushData::MeshDrawDwordCount : 0;
@@ -748,6 +756,9 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 	for (uint32_t i = 0; i < (tess_active ? 3u : 1u); i++) {
 		result.vertex[i] = m_program_cache->Get(vertex_params[i], vertex_info[i], push_data_cursor);
 	}
+	// The stereo eye rides in the last push-constant dword; the packed shader data must not reach
+	// it.
+	EXIT_IF(stereo && push_data_cursor > ShaderRecompiler::IR::PushData::StereoEyeDword);
 	return result;
 }
 

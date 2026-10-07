@@ -4,8 +4,10 @@
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
 
-// stereo_eye is the eye a stereo expansion variant rasterizes, as read from the ancillary input.
+// When stereo is false the ancillary eye bit folds to 0 (mono / left eye). When true the shader is
+// a stereo-dynamic variant: the eye bit is left live so it reads PushData::StereoEyeDword at draw
+// time, letting one variant rasterize both eyes.
 void ConstantPropagationPass(const BlockList& blocks, uint32_t wave_size = 64,
-                             uint32_t stereo_eye = 0);
+                             bool stereo = false);
 
 } // namespace Libs::Graphics::ShaderRecompiler::IR

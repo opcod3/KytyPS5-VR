@@ -451,8 +451,9 @@ struct DrawRenderState {
 	std::array<ShaderVertexInputInfo, 3> vertex_info;
 	ShaderPixelInputInfo  ps_input_info;
 	PipelineCache::GraphicsPrograms programs;
-	// 1 while rasterizing the right eye of a stereo expansion draw.
-	uint32_t              stereo_eye = 0;
+	// Set when this draw rasterizes both eyes from one shared stereo-expansion variant; the eye is
+	// selected per draw command through PushData::StereoEyeDword.
+	bool                  stereo = false;
 };
 
 struct DrawCallInfo {
@@ -895,7 +896,7 @@ static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw,
 	state.programs = pipeline_cache.GetGraphicsPrograms(
 	    vertex_shader_info, pixel_shader_info, shader_regs, ctx, buffer.GetUserConfig(),
 	    target_export_mapping, state.ps_active, state.vertex_info, state.ps_input_info,
-	    state.stereo_eye);
+	    state.stereo);
 }
 
 // Stereo expansion rasterizes every primitive again for the right eye, through that eye's
@@ -917,6 +918,9 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 	                                        DrawRenderState& state) {
 	const auto& shader_regs       = buffer.GetRegisters().GetShaderRegisters();
 	const auto  color_output_mask = DrawColorOutputMask(buffer.GetRegisters());
+	// One shared variant rasterizes both eyes when stereo expansion is on; the draw loop below
+	// emits a command per eye.
+	state.stereo = StereoExpansionEnabled(buffer);
 	state.ps_active = buffer.GetShaders().GetPs().ps_regs.data_addr != 0 &&
 	                  (color_output_mask != 0 ||
 	                   PixelShaderHasDepthOrCoverageSideEffects(shader_regs));
@@ -1217,13 +1221,6 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		CommitIndexBuffer(vk_buffer, index_binding);
 	}
 
-	const uint32_t viewport_offset =
-	    state.stereo_eye * buffer.GetRegisters().GetStereoControl().viewport_id_offset;
-	auto& dynamic_state = m_context.GetCommandScheduler().GetDynamicState();
-	UpdateGraphicsDynamicState(buffer, dynamic_state, vertex_stages.back(), state.depth_info,
-	                           rendering, viewport_offset);
-	dynamic_state.SetAttachmentFeedbackLoopAspects(feedback_aspects);
-	dynamic_state.Commit(m_context.GetGraphics(), vk_buffer);
 
 	LogDrawPhase(draw.Name(), "BeginRendering");
 	if (!draw.IsIndexed()) {
@@ -1234,10 +1231,30 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x500u);
 	}
-	if (mesh_active) {
-		vk_buffer.drawMeshTasksEXT(mesh_groups, draw.instance_count, 1);
-	} else {
-		EmitDrawPrimitives(ucfg, vk_buffer, draw, emit);
+	// A stereo draw shares all of the expensive preparation above and emits one command per eye,
+	// each through its own viewport slot and with its eye index in PushData::StereoEyeDword. A mono
+	// draw is just the single eye-0 pass.
+	const uint32_t viewport_id_offset = buffer.GetRegisters().GetStereoControl().viewport_id_offset;
+	const uint32_t eye_count          = state.stereo ? 2u : 1u;
+	auto&          dynamic_state      = m_context.GetCommandScheduler().GetDynamicState();
+	for (uint32_t eye = 0; eye < eye_count; eye++) {
+		UpdateGraphicsDynamicState(buffer, dynamic_state, vertex_stages.back(), state.depth_info,
+		                           rendering, eye * viewport_id_offset);
+		dynamic_state.SetAttachmentFeedbackLoopAspects(feedback_aspects);
+		dynamic_state.Commit(m_context.GetGraphics(), vk_buffer);
+		if (state.stereo) {
+			const uint32_t eye_value = eye;
+			vk_buffer.pushConstants(
+			    pipeline.pipeline_layout,
+			    vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment,
+			    ShaderRecompiler::IR::PushData::StereoEyeDword * sizeof(uint32_t), sizeof(eye_value),
+			    &eye_value);
+		}
+		if (mesh_active) {
+			vk_buffer.drawMeshTasksEXT(mesh_groups, draw.instance_count, 1);
+		} else {
+			EmitDrawPrimitives(ucfg, vk_buffer, draw, emit);
+		}
 	}
 
 	if (!draw.IsIndexed()) {
@@ -1371,17 +1388,9 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	emit.vertex_offset  = native_indirect ? 0 : vertex_offset + args.base_vertex;
 	emit.first_instance = native_indirect ? 0 : instance_offset;
 
+	// Both eyes share this preparation; ExecutePreparedDraw emits one command per eye.
 	ExecutePreparedDraw(submit_id, buffer, draw, state, topology, emit, index_source,
 	                    primitive_restart);
-	if (StereoExpansionEnabled(buffer)) {
-		ResetBindings();
-		state            = {};
-		state.stereo_eye = 1;
-		if (PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state)) {
-			ExecutePreparedDraw(submit_id, buffer, draw, state, topology, emit, index_source,
-			                    primitive_restart);
-		}
-	}
 	ResetBindings();
 }
 
@@ -1473,16 +1482,8 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 	emit.first_instance = native_indirect ? 0 : instance_offset;
 
 	DrawIndexBufferSource index_source {};
+	// Both eyes share this preparation; ExecutePreparedDraw emits one command per eye.
 	ExecutePreparedDraw(submit_id, buffer, draw, state, topology, emit, index_source, false);
-	if (StereoExpansionEnabled(buffer)) {
-		ResetBindings();
-		state            = {};
-		state.stereo_eye = 1;
-		if (PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state)) {
-			ExecutePreparedDraw(submit_id, buffer, draw, state, topology, emit, index_source,
-			                    false);
-		}
-	}
 	ResetBindings();
 }
 

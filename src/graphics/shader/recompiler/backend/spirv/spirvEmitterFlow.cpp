@@ -19,9 +19,32 @@ bool UserDataDwordIndex(const EmitterState& state, IR::ScalarReg reg, uint32_t& 
 	return true;
 }
 
+// Loads the stereo eye index (0 or 1) that the draw pushed into PushData::StereoEyeDword.
+uint32_t EmitStereoEye(EmitterState& state) {
+	const auto pointer = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpAccessChain, TypePushConstantElementPointer(state), pointer,
+	                          state.push_constant_variable, ConstantU32(state, 0),
+	                          ConstantU32(state, IR::PushData::StereoEyeDword));
+	const auto raw = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpLoad, TypeU32(state), raw, pointer);
+	return EmitBinaryU32(state, spv::OpBitwiseAnd, raw, ConstantU32(state, 1u));
+}
+
 uint32_t EmitBuiltinU32(EmitterState& state, IR::StageInputKind kind, uint32_t component) {
 	if (kind == IR::StageInputKind::LocalInvocationIndex) {
 		return EmitLocalInvocationIndex(state);
+	}
+	if (kind == IR::StageInputKind::PackedAncillary && state.program.bindings.uses_stereo_eye) {
+		// One stereo variant serves both eyes: supply ancillary bit 7 from the pushed eye index
+		// instead of the (emulated) hardware ancillary register, which never carries it.
+		const auto variable = InputVariableForKind(state, kind);
+		const auto base     = variable == 0 ? ConstantU32(state, 0)
+		                                    : EmitInputComponentU32(state, kind, component);
+		const auto cleared  = EmitBinaryU32(state, spv::OpBitwiseAnd, base,
+		                                    ConstantU32(state, ~uint32_t {0x80}));
+		const auto shifted  = EmitBinaryU32(state, spv::OpShiftLeftLogical, EmitStereoEye(state),
+		                                    ConstantU32(state, 7u));
+		return EmitBinaryU32(state, spv::OpBitwiseOr, cleared, shifted);
 	}
 	if (state.lane_count == 2 && (kind == IR::StageInputKind::LocalInvocationId ||
 	                              kind == IR::StageInputKind::GlobalInvocationId)) {
@@ -359,26 +382,38 @@ void EmitAuxPositionExport(ValueEmitContext& ctx, uint32_t data, const IR::Expor
 		const auto output = IR::DecodePositionExportComponent(
 		    state.input_info.vertex->pa_cl_vs_out_cntl, exp.index, component);
 		if (output.stereo_x) {
-			// The right-eye variant replaces the position X; the position is exported first.
-			if (state.input_info.vertex->stereo_eye == 0) {
+			// A mono draw only ever shows the left eye, so its separately-exported right-eye X is
+			// unused.
+			if (!state.program.bindings.uses_stereo_eye) {
 				continue;
 			}
+			// One stereo variant rasterizes both eyes: the right-eye X is exported alongside the
+			// (already-stored) left-eye position, and overwrites position X only when this draw
+			// pushed the right eye.
 			EXIT_NOT_IMPLEMENTED(state.program.stage == ShaderType::Mesh);
-			const auto raw = ExportRawComponent(ctx, data, component);
-			auto       x   = state.builder.AllocateId();
-			state.builder.AddFunction(spv::OpBitcast, TypeF32(state), x, raw);
-			const auto& transform = state.input_info.vertex->clip_space;
+			const auto raw     = ExportRawComponent(ctx, data, component);
+			auto       right_x = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpBitcast, TypeF32(state), right_x, raw);
+			const auto& transform = state.input_info.vertex->stereo_clip_space;
 			if (transform.enabled) {
-				x = ConvertClipCoordinate(state, x, transform.scale[0], transform.offset[0],
-				                          transform.half_extent[0]);
+				right_x = ConvertClipCoordinate(state, right_x, transform.scale[0],
+				                                transform.offset[0], transform.half_extent[0]);
 			}
-			// gl_PerVertex member 0 is the position.
+			// gl_PerVertex member 0 is the position; it already holds the left-eye X.
 			const auto pointer = state.builder.AllocateId();
 			state.builder.AddFunction(spv::OpAccessChain,
 			                          TypePointer(state, spv::StorageClassOutput, TypeF32(state)),
 			                          pointer, state.per_vertex_variable, ConstantU32(state, 0),
 			                          ConstantU32(state, 0));
-			state.builder.AddFunction(spv::OpStore, pointer, x);
+			const auto left_x = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpLoad, TypeF32(state), left_x, pointer);
+			const auto is_right = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpINotEqual, TypeBool(state), is_right,
+			                          EmitStereoEye(state), ConstantU32(state, 0));
+			const auto selected = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpSelect, TypeF32(state), selected, is_right, right_x,
+			                          left_x);
+			state.builder.AddFunction(spv::OpStore, pointer, selected);
 			continue;
 		}
 		if (output.layer || output.viewport) {

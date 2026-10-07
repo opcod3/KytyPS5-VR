@@ -138,9 +138,14 @@ struct ShaderVertexInputInfo {
 	uint32_t                wave_size           = 64;
 	uint32_t                scratch_size_dwords = 0;
 	uint32_t                pa_cl_vs_out_cntl    = 0;
-	// Stereo expansion eye: the right eye (1) takes its clip-space X from the MISC vector W.
-	uint32_t                stereo_eye           = 0;
+	// Stereo expansion: when set, this is the single shared variant that rasterizes both eyes,
+	// reading the eye from PushData::StereoEyeDword at draw time (the right eye then takes its
+	// clip-space X from the MISC vector W). When clear it is a plain mono shader.
+	bool                    stereo               = false;
 	ShaderClipSpaceTransform clip_space;
+	// The right eye's clip-space transform, applied to the stereo right-eye X when clipping is
+	// disabled (clip_space holds the left eye's). Unused unless stereo && clip_space.enabled.
+	ShaderClipSpaceTransform stereo_clip_space;
 	ShaderMeshInputInfo      mesh;
 	ShaderTessellationInputInfo tess;
 	bool                    fetch_external      = false;
@@ -194,8 +199,9 @@ struct ShaderPixelInputInfo {
 	ShaderAlphaBlendSource                         alpha_blend_source = ShaderAlphaBlendSource::None;
 	bool                                           ps_early_z                   = false;
 	bool                                           ps_execute_on_noop           = false;
-	// Stereo expansion eye reported through the packed ancillary input.
-	uint32_t                                       stereo_eye                   = 0;
+	// Stereo expansion: the single shared variant rasterizing both eyes reads the eye from the
+	// packed ancillary input, supplied at draw time through PushData::StereoEyeDword.
+	bool                                           stereo                       = false;
 	ShaderStageRuntime                             stage;
 
 	bool HasPositionInput() const { return ps_pos_x || ps_pos_y || ps_pos_z || ps_pos_w; }

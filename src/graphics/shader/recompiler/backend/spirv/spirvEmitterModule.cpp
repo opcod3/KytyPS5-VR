@@ -244,7 +244,8 @@ void DefineDescriptors(EmitterState& state) {
 	    IR::PushData::StartFor(bindings.push_data_start_dword, bindings.ShaderDataDwords());
 	counts[static_cast<size_t>(Kind::ShaderData)] =
 	    bindings.ShaderDataDwords() != 0 && !bindings.UsesPushData();
-	if (state.program.bindings.UsesPushData() || state.program.stage == ShaderType::Mesh) {
+	if (state.program.bindings.UsesPushData() || state.program.stage == ShaderType::Mesh ||
+	    state.program.bindings.uses_stereo_eye) {
 		const auto type              = PushConstantBlockType(state);
 		state.push_constant_variable = state.builder.DefineGlobalVariable(
 		    TypePointer(state, spv::StorageClassPushConstant, type), spv::StorageClassPushConstant);

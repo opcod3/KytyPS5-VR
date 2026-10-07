@@ -422,8 +422,19 @@ void Visit(Program& program, ShaderStageInputInfo input_info, InputUsage& inputs
 			const auto kind      = static_cast<StageInputKind>(inst.Arg(0).U32());
 			const auto component = inst.Arg(1).U32();
 			switch (kind) {
-				case StageInputKind::PackedAncillary:
+				case StageInputKind::PackedAncillary: {
+					// A stereo-expansion variant keeps the packed ancillary live to read the
+					// eye bit, supplied from PushData::StereoEyeDword at draw time (see
+					// EmitBuiltinU32). Every other configuration fully decomposes it, so a
+					// live use is otherwise unsupported.
+					const bool stereo =
+					    (input_info.pixel != nullptr && input_info.pixel->stereo) ||
+					    (input_info.vertex != nullptr && input_info.vertex->stereo);
+					if (stereo) {
+						break;
+					}
 					return Fail("packed pixel ancillary input has an unsupported live use");
+				}
 				case StageInputKind::Layer:
 				case StageInputKind::SampleId:
 					if (program.stage != ShaderType::Pixel || component != 0u) {

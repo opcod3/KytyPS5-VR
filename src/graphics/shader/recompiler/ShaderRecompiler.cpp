@@ -789,11 +789,12 @@ TranslateResult TranslateProgram(const Decoder::Program& decoded, const CompileO
 	     GetDumpLabel(options), StageName(options.stage), options.shader_hash,
 	     static_cast<uint64_t>(ir.blocks.size()), phase_ms());
 	IR::RewriteToSsa(ir.blocks);
-	const uint32_t stereo_eye =
-	    options.stage == ShaderType::Pixel && options.input_info.pixel != nullptr
-	        ? options.input_info.pixel->stereo_eye
-	        : 0u;
-	IR::ConstantPropagationPass(ir.blocks, ir.wave_size, stereo_eye);
+	// A stereo-expansion draw compiles one shared variant that reads the eye dynamically; a mono
+	// draw folds the eye to 0. The flag rides on whichever input info this stage carries.
+	const bool stereo =
+	    (options.input_info.pixel != nullptr && options.input_info.pixel->stereo) ||
+	    (options.input_info.vertex != nullptr && options.input_info.vertex->stereo);
+	IR::ConstantPropagationPass(ir.blocks, ir.wave_size, stereo);
 	IR::ResolveControlFlowIdentities(ir);
 	IR::RemoveIdentities(ir.blocks);
 	IR::EliminateDeadCode(ir.blocks);
@@ -801,7 +802,7 @@ TranslateResult TranslateProgram(const Decoder::Program& decoded, const CompileO
 	if (read_lane_stats.rewritten_reads != 0) {
 		LOGF("%s read-lane elimination: reads=%" PRIu32 "\n", GetDumpLabel(options),
 		     read_lane_stats.rewritten_reads);
-		IR::ConstantPropagationPass(ir.blocks, ir.wave_size, stereo_eye);
+		IR::ConstantPropagationPass(ir.blocks, ir.wave_size, stereo);
 		IR::ResolveControlFlowIdentities(ir);
 		IR::RemoveIdentities(ir.blocks);
 		IR::EliminateDeadCode(ir.blocks);
@@ -879,6 +880,11 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 	IR::EliminateDeadCode(ir.blocks);
 
 	IR::CollectShaderInfo(ir, options.input_info);
+	// A stereo-expansion variant reads the eye from PushData::StereoEyeDword at draw time, so it
+	// needs the push-constant block even when it has no shader data of its own.
+	ir.bindings.uses_stereo_eye =
+	    (options.input_info.pixel != nullptr && options.input_info.pixel->stereo) ||
+	    (options.input_info.vertex != nullptr && options.input_info.vertex->stereo);
 	std::string ir_dump;
 	if (options.dump_ir) {
 		ir_dump = MakeIrDump(translated.cfg_dump, ir);
