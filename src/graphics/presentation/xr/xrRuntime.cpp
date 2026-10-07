@@ -543,6 +543,28 @@ void Runtime::RequestRefreshRate(float hz) {
 	}
 }
 
+bool Runtime::GetControllerState(Hand hand, ControllerState* state) {
+	return m_input != nullptr && m_input->GetState(hand, state);
+}
+
+void Runtime::ResetControllerOrientation(Hand hand) {
+	if (m_input != nullptr) {
+		m_input->ResetOrientation(hand);
+	}
+}
+
+void Runtime::SetControllerVibration(Hand hand, float amplitude) {
+	if (m_input != nullptr) {
+		m_input->SetVibration(hand, amplitude);
+	}
+}
+
+void Runtime::SetTriggerVibration(Hand hand, const TriggerVibration& vibration) {
+	if (m_input != nullptr) {
+		m_input->SetTriggerVibration(hand, vibration);
+	}
+}
+
 void Runtime::SetVblankHandler(std::function<void()> handler) {
 	Common::LockGuard lock(m_vblank_mutex);
 	m_vblank_handler = std::move(handler);
@@ -649,8 +671,12 @@ bool IsActive() {
 	return g_runtime != nullptr;
 }
 
-void Shutdown() {
+void ShutdownRuntime() {
 	g_runtime.reset();
+}
+
+Headset* GetRuntimeHeadset() {
+	return g_runtime.get();
 }
 
 vk::Result CreateVulkanInstance(const vk::InstanceCreateInfo& create_info,
@@ -681,127 +707,6 @@ void StopSession() {
 	}
 }
 
-SessionState GetSessionState() {
-	return g_runtime != nullptr ? g_runtime->GetSessionState() : SessionState::None;
-}
-
-bool IsHeadsetReady() {
-	switch (GetSessionState()) {
-		case SessionState::Synchronized:
-		case SessionState::Visible:
-		case SessionState::Focused: return true;
-		default: return false;
-	}
-}
-
-bool IsUserPresent() {
-	return g_runtime != nullptr && g_runtime->IsUserPresent();
-}
-
-bool GetFieldOfView(EyeFov* fov) {
-	EXIT_IF(fov == nullptr);
-	std::array<XrView, 2> views {};
-	if (g_runtime == nullptr || !g_runtime->GetViews(&views)) {
-		return false;
-	}
-	// The guest describes one eye and mirrors it for the other; take the wider side of both.
-	const auto& left  = views[0].fov;
-	const auto& right = views[1].fov;
-	fov->tan_out      = std::max(std::tan(-left.angleLeft), std::tan(right.angleRight));
-	fov->tan_in       = std::max(std::tan(left.angleRight), std::tan(-right.angleLeft));
-	fov->tan_top      = std::max(std::tan(left.angleUp), std::tan(right.angleUp));
-	fov->tan_bottom   = std::max(std::tan(-left.angleDown), std::tan(-right.angleDown));
-	return true;
-}
-
-bool GetEyeSeparation(float* meters) {
-	EXIT_IF(meters == nullptr);
-	std::array<XrView, 2> views {};
-	if (g_runtime == nullptr || !g_runtime->GetViews(&views)) {
-		return false;
-	}
-	const auto& a = views[0].pose.position;
-	const auto& b = views[1].pose.position;
-	*meters = std::sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) +
-	                    (a.z - b.z) * (a.z - b.z));
-	return true;
-}
-
-uint64_t BeginFrame(int64_t flip_arg) {
-	EXIT_IF(g_runtime == nullptr);
-	return g_runtime->BindDisplayTime(flip_arg, true);
-}
-
-uint64_t GetPredictedDisplayTime(int64_t flip_arg) {
-	EXIT_IF(g_runtime == nullptr);
-	return g_runtime->BindDisplayTime(flip_arg, false);
-}
-
-bool LocateHead(uint64_t time, int64_t flip_arg, HeadLocation* location) {
-	return g_runtime != nullptr && g_runtime->LocateHead(time, flip_arg, location);
-}
-
-CoordinateSystem GetCoordinateSystem() {
-	return g_runtime != nullptr ? g_runtime->GetCoordinateSystem() : CoordinateSystem::LocalFloor;
-}
-
-bool SetCoordinateSystem(CoordinateSystem system) {
-	return g_runtime != nullptr && g_runtime->SetCoordinateSystem(system);
-}
-
-bool ResetLocalCoordinate() {
-	return g_runtime != nullptr && g_runtime->ResetLocalCoordinate(nullptr);
-}
-
-bool ResetLocalCoordinate(const Pose& pose) {
-	return g_runtime != nullptr && g_runtime->ResetLocalCoordinate(&pose);
-}
-
-bool LocateCoordinateSystem(CoordinateSystem system, Pose* origin) {
-	return g_runtime != nullptr && g_runtime->LocateCoordinateSystem(system, origin);
-}
-
-uint32_t GetPlayAreaUpdateCounter() {
-	return g_runtime != nullptr ? g_runtime->GetPlayAreaUpdateCounter() : 0;
-}
-
-bool GetPlayAreaBounds(PlayAreaBounds* bounds) {
-	return g_runtime != nullptr && g_runtime->GetPlayAreaBounds(bounds);
-}
-
-bool HasPlayAreaBounds() {
-	return g_runtime != nullptr && g_runtime->HasPlayAreaBounds();
-}
-
-bool GetControllerState(Hand hand, ControllerState* state) {
-	EXIT_IF(state == nullptr);
-	*state = {};
-	return g_runtime != nullptr && g_runtime->GetInput() != nullptr &&
-	       g_runtime->GetInput()->GetState(hand, state);
-}
-
-bool LocateController(Hand hand, uint64_t time, Location* location) {
-	return g_runtime != nullptr && g_runtime->LocateController(hand, time, location);
-}
-
-void ResetControllerOrientation(Hand hand) {
-	if (g_runtime != nullptr && g_runtime->GetInput() != nullptr) {
-		g_runtime->GetInput()->ResetOrientation(hand);
-	}
-}
-
-void SetControllerVibration(Hand hand, float amplitude) {
-	if (g_runtime != nullptr && g_runtime->GetInput() != nullptr) {
-		g_runtime->GetInput()->SetVibration(hand, amplitude);
-	}
-}
-
-void SetTriggerVibration(Hand hand, const TriggerVibration& vibration) {
-	if (g_runtime != nullptr && g_runtime->GetInput() != nullptr) {
-		g_runtime->GetInput()->SetTriggerVibration(hand, vibration);
-	}
-}
-
 void RecordPanelCopy(vk::CommandBuffer command, vk::Image source, vk::Format format,
                      vk::Extent2D extent, const PanelView& view) {
 	EXIT_IF(g_runtime == nullptr);
@@ -813,21 +718,11 @@ void PanelCopySubmitted() {
 	g_runtime->PanelCopySubmitted();
 }
 
-void RequestRefreshRate(float hz) {
-	if (g_runtime != nullptr) {
-		g_runtime->RequestRefreshRate(hz);
-	}
-}
-
-void SetVblankHandler(std::function<void()> handler) {
-	if (g_runtime != nullptr) {
-		g_runtime->SetVblankHandler(std::move(handler));
-	}
-}
-
 } // namespace Libs::Graphics::Xr
 
 #else // KYTY_OPENXR
+
+#include "graphics/presentation/xr/xrHeadset.h"
 
 namespace Libs::Graphics::Xr {
 
@@ -840,7 +735,11 @@ bool IsActive() {
 	return false;
 }
 
-void Shutdown() {}
+void ShutdownRuntime() {}
+
+Headset* GetRuntimeHeadset() {
+	return nullptr;
+}
 
 vk::Result CreateVulkanInstance(const vk::InstanceCreateInfo& /*create_info*/,
                                 vk::Instance* /*instance*/) {
@@ -863,97 +762,12 @@ void StartSession(GraphicContext* /*graphics*/) {}
 
 void StopSession() {}
 
-SessionState GetSessionState() {
-	return SessionState::None;
-}
-
-bool IsHeadsetReady() {
-	return false;
-}
-
-bool IsUserPresent() {
-	return false;
-}
-
-bool GetFieldOfView(EyeFov* /*fov*/) {
-	return false;
-}
-
-bool GetEyeSeparation(float* /*meters*/) {
-	return false;
-}
-
-uint64_t BeginFrame(int64_t /*flip_arg*/) {
-	EXIT("OpenXR: this build has no OpenXR support\n");
-	return 0;
-}
-
-uint64_t GetPredictedDisplayTime(int64_t /*flip_arg*/) {
-	EXIT("OpenXR: this build has no OpenXR support\n");
-	return 0;
-}
-
-bool LocateHead(uint64_t /*time*/, int64_t /*flip_arg*/, HeadLocation* /*location*/) {
-	return false;
-}
-
-CoordinateSystem GetCoordinateSystem() {
-	return CoordinateSystem::LocalFloor;
-}
-
-bool SetCoordinateSystem(CoordinateSystem /*system*/) {
-	return false;
-}
-
-bool ResetLocalCoordinate() {
-	return false;
-}
-
-bool ResetLocalCoordinate(const Pose& /*pose*/) {
-	return false;
-}
-
-bool LocateCoordinateSystem(CoordinateSystem /*system*/, Pose* /*origin*/) {
-	return false;
-}
-
-uint32_t GetPlayAreaUpdateCounter() {
-	return 0;
-}
-
-bool GetPlayAreaBounds(PlayAreaBounds* /*bounds*/) {
-	return false;
-}
-
-bool HasPlayAreaBounds() {
-	return false;
-}
-
-bool GetControllerState(Hand /*hand*/, ControllerState* state) {
-	*state = {};
-	return false;
-}
-
-bool LocateController(Hand /*hand*/, uint64_t /*time*/, Location* /*location*/) {
-	return false;
-}
-
-void ResetControllerOrientation(Hand /*hand*/) {}
-
-void SetControllerVibration(Hand /*hand*/, float /*amplitude*/) {}
-
-void SetTriggerVibration(Hand /*hand*/, const TriggerVibration& /*vibration*/) {}
-
 void RecordPanelCopy(vk::CommandBuffer /*command*/, vk::Image /*source*/, vk::Format /*format*/,
                      vk::Extent2D /*extent*/, const PanelView& /*view*/) {
 	EXIT("OpenXR: this build has no OpenXR support\n");
 }
 
 void PanelCopySubmitted() {}
-
-void RequestRefreshRate(float /*hz*/) {}
-
-void SetVblankHandler(std::function<void()> /*handler*/) {}
 
 } // namespace Libs::Graphics::Xr
 

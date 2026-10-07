@@ -5,6 +5,8 @@
 #include "common/assert.h"
 #include "kernel/pthread.h"
 
+#include <algorithm>
+#include <cmath>
 #include <limits>
 
 namespace Libs::Graphics::Xr {
@@ -100,6 +102,33 @@ bool Runtime::GetViews(std::array<XrView, 2>* views) {
 		return false;
 	}
 	*views = m_eye_views;
+	return true;
+}
+
+bool Runtime::GetFieldOfView(EyeFov* fov) {
+	std::array<XrView, 2> views {};
+	if (!GetViews(&views)) {
+		return false;
+	}
+	// The guest describes one eye and mirrors it for the other; take the wider side of both.
+	const auto& left  = views[0].fov;
+	const auto& right = views[1].fov;
+	fov->tan_out      = std::max(std::tan(-left.angleLeft), std::tan(right.angleRight));
+	fov->tan_in       = std::max(std::tan(left.angleRight), std::tan(-right.angleLeft));
+	fov->tan_top      = std::max(std::tan(left.angleUp), std::tan(right.angleUp));
+	fov->tan_bottom   = std::max(std::tan(-left.angleDown), std::tan(-right.angleDown));
+	return true;
+}
+
+bool Runtime::GetEyeSeparation(float* meters) {
+	std::array<XrView, 2> views {};
+	if (!GetViews(&views)) {
+		return false;
+	}
+	const auto& a = views[0].pose.position;
+	const auto& b = views[1].pose.position;
+	*meters = std::sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) +
+	                    (a.z - b.z) * (a.z - b.z));
 	return true;
 }
 

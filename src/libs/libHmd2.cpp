@@ -290,26 +290,19 @@ static int32_t KYTY_SYSV_ABI Hmd2Initialize(const SceHmd2InitializeParam* param)
 
 static void FillDeviceInformation(SceHmd2DeviceInformation* info) {
 	*info = {};
-	if (Graphics::Xr::IsActive()) {
-		info->status   = Graphics::Xr::IsHeadsetReady() ? 0 : 1; // READY : NOT_READY
-		info->hmuMount = Graphics::Xr::IsUserPresent() ? 1 : 0;
-		float separation = 0.063f;
-		(void)Graphics::Xr::GetEyeSeparation(&separation);
-		info->lensSeparationDistance = static_cast<uint8_t>(std::lround(separation * 1000.0f));
-		// Games size their render targets for the PSVR2 panel; the runtime resamples it.
-		info->deviceInfo.panelResolution = {PANEL_WIDTH, PANEL_HEIGHT};
-		info->virtualImageDistance       = 2.0f;
-	} else if (Config::VrEnabled()) {
-		// Virtual headset defaults: READY, MOUNT, 63 mm lens separation.
-		info->hmuMount               = 1;
-		info->lensSeparationDistance = 63;
-		// Headset characteristics: 4000x2040 panel and 2 m virtual image distance.
-		info->deviceInfo.panelResolution = {PANEL_WIDTH, PANEL_HEIGHT};
-		info->virtualImageDistance       = 2.0f;
-		// Host presentation has no emulated headset scan-out delay; latency remains zero.
-	} else {
+	if (!Graphics::Xr::HasHeadset()) {
 		info->status = 2; // SCE_HMD2_DEVICE_STATUS_NOT_DETECTED
+		return;
 	}
+	// The virtual headset reports itself ready, mounted, and 63 mm from GetEyeSeparation.
+	info->status     = Graphics::Xr::IsHeadsetReady() ? 0 : 1; // READY : NOT_READY
+	info->hmuMount   = Graphics::Xr::IsUserPresent() ? 1 : 0;
+	float separation = 0.063f;
+	(void)Graphics::Xr::GetEyeSeparation(&separation);
+	info->lensSeparationDistance = static_cast<uint8_t>(std::lround(separation * 1000.0f));
+	// Games size their render targets for the PSVR2 panel; the runtime resamples it.
+	info->deviceInfo.panelResolution = {PANEL_WIDTH, PANEL_HEIGHT};
+	info->virtualImageDistance       = 2.0f;
 }
 
 static int32_t KYTY_SYSV_ABI Hmd2GetDeviceInformation(SceHmd2DeviceInformation* info) {
@@ -327,8 +320,6 @@ static int32_t KYTY_SYSV_ABI Hmd2GetDeviceInformation(SceHmd2DeviceInformation* 
 	return OK;
 }
 
-// The host headset's field of view, once its first frame has located the views; until then, and
-// with the virtual headset, the ER15 one.
 // Always the PSVR2's field of view, even on a host headset. Games mask what the PSVR2 lenses
 // cannot show with fixed shapes (Horizon Call of the Mountain blacks out the temporal side), so a
 // different frustum puts the mask in view. The projection layer carries the frustum the game
@@ -336,8 +327,7 @@ static int32_t KYTY_SYSV_ABI Hmd2GetDeviceInformation(SceHmd2DeviceInformation* 
 static void GetFieldOfView(SceHmd2FieldOfView* fov) {
 	static std::atomic_flag logged = ATOMIC_FLAG_INIT;
 	Graphics::Xr::EyeFov    host {};
-	if (Graphics::Xr::IsActive() && Graphics::Xr::GetFieldOfView(&host) &&
-	    !logged.test_and_set(std::memory_order_relaxed)) {
+	if (Graphics::Xr::GetFieldOfView(&host) && !logged.test_and_set(std::memory_order_relaxed)) {
 		LOGF("Hmd2: host headset FOV tangents out=%f in=%f top=%f bottom=%f\n", host.tan_out,
 		     host.tan_in, host.tan_top, host.tan_bottom);
 	}
@@ -403,7 +393,7 @@ static int32_t KYTY_SYSV_ABI Hmd2ReprojectionEnableVrMode(uint64_t output_mode) 
 	if (output_mode != OUTPUT_MODE_89_91HZ && output_mode != OUTPUT_MODE_119_88HZ) {
 		return VideoOut::VIDEO_OUT_ERROR_INVALID_VALUE;
 	}
-	if (!Config::VrEnabled()) {
+	if (!Graphics::Xr::HasHeadset()) {
 		return VideoOut::VIDEO_OUT_ERROR_NO_DEVICE;
 	}
 	uint64_t expected = 0;
@@ -411,9 +401,7 @@ static int32_t KYTY_SYSV_ABI Hmd2ReprojectionEnableVrMode(uint64_t output_mode) 
 		return ERROR_REPROJECTION_IN_VR_MODE;
 	}
 	LOGF("Hmd2: VR output mode=0x%" PRIx64 "\n", output_mode);
-	if (Graphics::Xr::IsActive()) {
-		Graphics::Xr::RequestRefreshRate(OutputModeRefreshRate(output_mode));
-	}
+	Graphics::Xr::RequestRefreshRate(OutputModeRefreshRate(output_mode));
 	return OK;
 }
 
@@ -487,12 +475,7 @@ static int32_t KYTY_SYSV_ABI Hmd2ReprojectionGetPredictedDisplayTime(int64_t   f
 	if (timestamp == nullptr) {
 		return ERROR_PARAMETER_NULL;
 	}
-	if (Graphics::Xr::IsActive()) {
-		*timestamp = Graphics::Xr::GetPredictedDisplayTime(flip_arg);
-		return OK;
-	}
-	// No scan-out is emulated; predict one 120 Hz refresh ahead of now.
-	*timestamp = LibKernel::KernelGetProcessTime() + 1000000 / 120;
+	*timestamp = Graphics::Xr::GetPredictedDisplayTime(flip_arg);
 	return OK;
 }
 
@@ -502,9 +485,7 @@ static int32_t KYTY_SYSV_ABI Hmd2ReprojectionBeginFrame(int64_t flip_arg) {
 	if (GetReprojectionState() == nullptr) {
 		return ERROR_REPROJECTION_NOT_INITIALIZED;
 	}
-	if (Graphics::Xr::IsActive()) {
-		(void)Graphics::Xr::BeginFrame(flip_arg);
-	}
+	(void)Graphics::Xr::BeginFrame(flip_arg);
 	return OK;
 }
 

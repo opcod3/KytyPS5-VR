@@ -262,11 +262,11 @@ struct VideoOutConfig {
 };
 
 // Pending flips of all ports. There are two clocks: the present thread flips everything except
-// the headset port of an OpenXR headset, which the OpenXR frame thread flips.
+// the headset port, which the headset drives (the OpenXR frame thread, or the virtual headset's
+// vblank thread).
 class FlipQueue {
 public:
-	FlipQueue(Graphics::Presenter& presenter, bool headset_clock)
-	    : m_presenter(presenter), m_headset_clock(headset_clock) {
+	explicit FlipQueue(Graphics::Presenter& presenter) : m_presenter(presenter) {
 		EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
 	}
 	~FlipQueue();
@@ -303,7 +303,6 @@ private:
 	};
 
 	Graphics::Presenter& m_presenter;
-	const bool           m_headset_clock;
 	Common::Mutex        m_mutex;
 	Common::CondVar      m_submit_cond_var;
 	Common::CondVar      m_submit_slot_cond_var;
@@ -324,14 +323,13 @@ public:
 	static constexpr int VIDEO_OUT_NUM_MAX = VIDEO_OUT_BUSES.size() + 1;
 
 	Impl(uint32_t width, uint32_t height, Graphics::Presenter& presenter)
-	    : m_renderer(presenter.Renderer()), m_presenter(presenter),
-	      m_headset_clock(Graphics::Xr::IsActive()), m_flip_queue(presenter, m_headset_clock) {
+	    : m_renderer(presenter.Renderer()), m_presenter(presenter), m_flip_queue(presenter) {
 		EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
 		Init(width, height);
 		m_present_thread = std::jthread([this](std::stop_token token) { PresentThread(token); });
-		if (m_headset_clock) {
-			Graphics::Xr::SetVblankHandler([this] { HeadsetVblank(); });
-		}
+		// The HMD2 port runs on the headset's clock. With no headset this is a no-op, and no HMD2
+		// port is ever opened.
+		Graphics::Xr::SetVblankHandler([this] { HeadsetVblank(); });
 	}
 	~Impl();
 	KYTY_CLASS_NO_COPY(Impl);
@@ -356,16 +354,14 @@ public:
 	void HeadsetVblank();
 
 private:
-	[[nodiscard]] bool OnHeadsetClock(const VideoOutConfig& cfg) const {
-		return m_headset_clock && cfg.bus == VIDEO_OUT_BUS_TYPE_HMD2_MAIN;
+	[[nodiscard]] static bool OnHeadsetClock(const VideoOutConfig& cfg) {
+		return cfg.bus == VIDEO_OUT_BUS_TYPE_HMD2_MAIN;
 	}
 
 	Common::Mutex            m_mutex;
 	VideoOutConfig           m_video_out_ctx[VIDEO_OUT_NUM_MAX];
 	Graphics::RenderContext& m_renderer;
 	Graphics::Presenter&     m_presenter;
-	// The headset port follows the OpenXR headset's refresh instead of the main vblank.
-	const bool               m_headset_clock;
 	FlipQueue                m_flip_queue;
 	std::jthread             m_present_thread;
 };
@@ -766,9 +762,7 @@ void VideoOutShutdown() {
 }
 
 VideoOutDriver::Impl::~Impl() {
-	if (m_headset_clock) {
-		Graphics::Xr::SetVblankHandler(nullptr);
-	}
+	Graphics::Xr::SetVblankHandler(nullptr);
 	if (m_present_thread.joinable()) {
 		m_present_thread.request_stop();
 		m_present_thread.join();
@@ -1147,7 +1141,7 @@ bool FlipQueue::Reserve(VideoOutConfig& cfg, int index, int64_t flip_arg, FlipRe
 	r.submit_ptc = LibKernel::KernelGetProcessTimeCounter();
 	r.source     = source;
 	r.state      = RequestState::Reserved;
-	r.headset    = m_headset_clock && cfg.bus == VIDEO_OUT_BUS_TYPE_HMD2_MAIN;
+	r.headset    = cfg.bus == VIDEO_OUT_BUS_TYPE_HMD2_MAIN;
 	if (cfg.slave_count != 0) {
 		for (auto* queue: {&m_requests, &m_cpu_requests}) {
 			for (auto& slave: *queue) {
@@ -2185,7 +2179,7 @@ KYTY_SYSV_ABI int VideoOutConfigureOutput(int handle, uint64_t mode,
 	                      reinterpret_cast<void*>(ctx->output_mode));
 	const bool headset = ctx->bus == VIDEO_OUT_BUS_TYPE_HMD2_MAIN;
 	ctx->mutex.Unlock();
-	if (headset && Graphics::Xr::IsActive() && Hmd2::OutputModeRefreshRate(mode) != 0.0f) {
+	if (headset && Hmd2::OutputModeRefreshRate(mode) != 0.0f) {
 		Graphics::Xr::RequestRefreshRate(Hmd2::OutputModeRefreshRate(mode));
 	}
 

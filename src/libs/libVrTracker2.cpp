@@ -193,34 +193,16 @@ static std::atomic<bool>     g_initialized = false;
 static std::mutex            g_devices_mutex;
 static std::array<Device, 3> g_devices {};
 
-// Fixed virtual poses in the LOCAL_FLOOR coordinate system: a standing user looking down -Z
-// with both hands held forward. Nothing moves until host input is wired to tracking.
-constexpr float       HEAD_HEIGHT = 1.6f;
-constexpr float       HALF_IPD    = 0.0315f;
-constexpr FQuaternion IDENTITY    = {0.0f, 0.0f, 0.0f, 1.0f};
-constexpr FVector3    HAND_LEFT   = {-0.2f, 1.2f, -0.3f};
-constexpr FVector3    HAND_RIGHT  = {0.2f, 1.2f, -0.3f};
-
-// The virtual headset's coordinate system and play area, a 2 x 2 m room around the origin.
-constexpr float VIRTUAL_PLAY_AREA_SIZE = 2.0f;
 // Used when the runtime cannot tell, as by the virtual headset.
 constexpr float PLAY_AREA_HEIGHT = 2.5f;
 // A position or orientation untracked for longer than this has stopped being trustworthy.
 constexpr uint64_t PARTIAL_QUALITY_US = 500000;
 
-static std::atomic<uint32_t> g_virtual_coordinate_system {0};
 static std::atomic<uint64_t> g_hmd_position_tracked_time {0};
 static std::atomic<uint64_t> g_hmd_orientation_tracked_time {0};
 // Per hand, left then right: when position and orientation were last tracked.
 static std::array<std::atomic<uint64_t>, 2> g_controller_position_tracked_time {};
 static std::array<std::atomic<uint64_t>, 2> g_controller_orientation_tracked_time {};
-
-static SceVrTracker2PoseData MakePose(FVector3 position) {
-	SceVrTracker2PoseData pose {};
-	pose.position    = position;
-	pose.orientation = IDENTITY;
-	return pose;
-}
 
 static SceVrTracker2PoseData FromXrPose(const Graphics::Xr::Pose& from) {
 	SceVrTracker2PoseData pose {};
@@ -269,27 +251,19 @@ static uint32_t Quality(bool valid, bool tracked, uint64_t now, std::atomic<uint
 // The play area in the current coordinate system: the pose of its centre on the floor and its
 // size along the centre's x and z.
 static bool GetPlayArea(SceVrTracker2PoseData* centre, float* width, float* depth) {
-	if (Graphics::Xr::IsActive()) {
-		Graphics::Xr::PlayAreaBounds bounds;
-		if (!Graphics::Xr::GetPlayAreaBounds(&bounds)) {
-			return false;
-		}
-		*centre = FromXrPose(bounds.origin);
-		*width  = bounds.width;
-		*depth  = bounds.depth;
-		return true;
+	Graphics::Xr::PlayAreaBounds bounds;
+	if (!Graphics::Xr::GetPlayAreaBounds(&bounds)) {
+		return false;
 	}
-	*centre = MakePose(FVector3 {0.0f, 0.0f, 0.0f});
-	*width  = VIRTUAL_PLAY_AREA_SIZE;
-	*depth  = VIRTUAL_PLAY_AREA_SIZE;
+	*centre = FromXrPose(bounds.origin);
+	*width  = bounds.width;
+	*depth  = bounds.depth;
 	return true;
 }
 
 // Polled with every result, so it must stay cheap.
 static uint32_t PlayAreaMode() {
-	return !Graphics::Xr::IsActive() || Graphics::Xr::HasPlayAreaBounds()
-	           ? PLAY_AREA_MODE_ROOM_SCALE
-	           : PLAY_AREA_MODE_STATIONARY;
+	return Graphics::Xr::HasPlayAreaBounds() ? PLAY_AREA_MODE_ROOM_SCALE : PLAY_AREA_MODE_STATIONARY;
 }
 
 // Fills the controller part of a result from the host runtime. The grip pose stands in for the
@@ -462,23 +436,10 @@ static int32_t KYTY_SYSV_ABI VrTracker2GetResult(const SceVrTracker2GetResultPar
 	result->orientationQuality    = QUALITY_FULL;
 	result->flipArg               = param->flipArg;
 
-	if (device_type == DEVICE_HMD && Graphics::Xr::IsActive()) {
+	if (device_type == DEVICE_HMD) {
 		LocateHmd(*param, result);
-	} else if (device_type == DEVICE_HMD) {
-		auto& hmd          = result->hmdInfo;
-		hmd.devicePose     = MakePose({0.0f, HEAD_HEIGHT, 0.0f});
-		hmd.leftEyePose    = MakePose({-HALF_IPD, HEAD_HEIGHT, 0.0f});
-		hmd.rightEyePose   = MakePose({HALF_IPD, HEAD_HEIGHT, 0.0f});
-		hmd.headPose       = MakePose({0.0f, HEAD_HEIGHT, 0.0f});
-		hmd.gazeOriginPose = MakePose({0.0f, HEAD_HEIGHT, 0.0f});
-	} else if (Graphics::Xr::IsActive()) {
-		LocateController(*param, device_type, result);
 	} else {
-		auto& controller = result->vrControllerInfo;
-		controller.devicePose =
-		    MakePose(device_type == DEVICE_VR_CONTROLLER_LEFT ? HAND_LEFT : HAND_RIGHT);
-		controller.lastValidVisionTimestamp = result->timestamp;
-		controller.lastValidSensorTimestamp = result->timestamp;
+		LocateController(*param, device_type, result);
 	}
 	return OK;
 }
@@ -498,8 +459,7 @@ static int32_t KYTY_SYSV_ABI VrTracker2GetCoordinateSystem(uint32_t* system) {
 	if (system == nullptr) {
 		return ERROR_ARGUMENT_INVALID;
 	}
-	*system = Graphics::Xr::IsActive() ? static_cast<uint32_t>(Graphics::Xr::GetCoordinateSystem())
-	                                   : g_virtual_coordinate_system.load();
+	*system = static_cast<uint32_t>(Graphics::Xr::GetCoordinateSystem());
 	return OK;
 }
 
@@ -512,19 +472,13 @@ static int32_t KYTY_SYSV_ABI VrTracker2SetCoordinateSystem(uint32_t system) {
 		return ERROR_ARGUMENT_INVALID;
 	}
 	LOGF("VrTracker2: coordinate system %u\n", system);
-	if (!Graphics::Xr::IsActive()) {
-		g_virtual_coordinate_system = system;
-		return OK;
-	}
 	return Graphics::Xr::SetCoordinateSystem(static_cast<Graphics::Xr::CoordinateSystem>(system))
 	           ? OK
 	           : ERROR_NOT_AVAILABLE;
 }
 
 static bool InStage() {
-	return (Graphics::Xr::IsActive() ? static_cast<uint32_t>(Graphics::Xr::GetCoordinateSystem())
-	                                 : g_virtual_coordinate_system.load()) ==
-	       static_cast<uint32_t>(Graphics::Xr::CoordinateSystem::Stage);
+	return Graphics::Xr::GetCoordinateSystem() == Graphics::Xr::CoordinateSystem::Stage;
 }
 
 static int32_t KYTY_SYSV_ABI VrTracker2ResetLocalCoordinate(int32_t handle) {
@@ -538,8 +492,7 @@ static int32_t KYTY_SYSV_ABI VrTracker2ResetLocalCoordinate(int32_t handle) {
 	if (InStage()) {
 		return ERROR_NOT_AVAILABLE_IN_CURRENT_PLAY_AREA_MODE;
 	}
-	// The virtual headset never moves, so it is always centred.
-	if (Graphics::Xr::IsActive() && !Graphics::Xr::ResetLocalCoordinate()) {
+	if (!Graphics::Xr::ResetLocalCoordinate()) {
 		return ERROR_NOT_AVAILABLE;
 	}
 	return OK;
@@ -556,7 +509,7 @@ static int32_t KYTY_SYSV_ABI VrTracker2ResetLocalCoordinateWithPose(const SceVrT
 	if (InStage()) {
 		return ERROR_NOT_AVAILABLE_IN_CURRENT_PLAY_AREA_MODE;
 	}
-	if (Graphics::Xr::IsActive() && !Graphics::Xr::ResetLocalCoordinate(ToXrPose(*pose))) {
+	if (!Graphics::Xr::ResetLocalCoordinate(ToXrPose(*pose))) {
 		return ERROR_NOT_AVAILABLE;
 	}
 	return OK;
@@ -570,11 +523,6 @@ static int32_t KYTY_SYSV_ABI VrTracker2LocateCoordinateSystem(uint32_t          
 	}
 	if (pose == nullptr || system > static_cast<uint32_t>(Graphics::Xr::CoordinateSystem::Stage)) {
 		return ERROR_ARGUMENT_INVALID;
-	}
-	if (!Graphics::Xr::IsActive()) {
-		// The virtual coordinate systems all share the floor origin.
-		*pose = MakePose(FVector3 {0.0f, 0.0f, 0.0f});
-		return OK;
 	}
 	Graphics::Xr::Pose origin;
 	if (!Graphics::Xr::LocateCoordinateSystem(static_cast<Graphics::Xr::CoordinateSystem>(system),

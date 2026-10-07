@@ -8,6 +8,7 @@
 #include "common/threads.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/presentation/xr/xrHeadset.h"
 #include "graphics/presentation/xr/xrRuntime.h"
 
 #include <array>
@@ -45,10 +46,10 @@ class Input;
 [[nodiscard]] Pose    FromXrPose(const XrPosef& pose);
 inline constexpr XrPosef IDENTITY_POSE {{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
 
-class Runtime final {
+class Runtime final : public Headset {
 public:
 	Runtime() = default;
-	~Runtime();
+	~Runtime() override;
 	KYTY_CLASS_NO_COPY(Runtime);
 
 	bool Create();
@@ -67,7 +68,7 @@ public:
 	                     vk::Extent2D extent, const PanelView& view);
 	void PanelCopySubmitted();
 
-	void SetVblankHandler(std::function<void()> handler);
+	void SetVblankHandler(std::function<void()> handler) override;
 	// Runs the vblank handler. Frame thread only.
 	void Vblank();
 
@@ -94,9 +95,9 @@ public:
 	[[nodiscard]] XrSession    GetSession() const { return m_session; }
 	[[nodiscard]] XrSystemId   GetSystemId() const { return m_system_id; }
 	[[nodiscard]] XrSpace      GetViewSpace() const { return m_view_space; }
-	[[nodiscard]] SessionState GetSessionState() const { return m_state; }
+	[[nodiscard]] SessionState GetSessionState() const override { return m_state; }
 	[[nodiscard]] bool         IsSessionRunning() const { return m_session_running; }
-	[[nodiscard]] bool         IsUserPresent() const { return m_user_present; }
+	[[nodiscard]] bool         IsUserPresent() const override { return m_user_present; }
 	[[nodiscard]] XrEnvironmentBlendMode GetBlendMode() const { return m_blend_mode; }
 	[[nodiscard]] GraphicContext*        GetGraphics() const { return m_graphics; }
 
@@ -111,7 +112,7 @@ public:
 
 	[[nodiscard]] const Extensions& GetExtensions() const { return m_ext; }
 
-	void RequestRefreshRate(float hz);
+	void RequestRefreshRate(float hz) override;
 
 	// Clock (xrClock.cpp). Guest time is KernelGetProcessTime microseconds.
 	void                   CalibrateClock();
@@ -121,21 +122,23 @@ public:
 
 	// Frame pacing, fed by the frame thread.
 	void     OnFrameWaited(const XrFrameState& state);
-	uint64_t BindDisplayTime(int64_t flip_arg, bool rebind);
+	uint64_t BindDisplayTime(int64_t flip_arg, bool rebind) override;
 
 	// Eye poses relative to the head and their fields of view, refreshed every frame.
 	void UpdateViews(const std::array<XrView, 2>& views);
 	bool GetViews(std::array<XrView, 2>* views);
+	bool GetFieldOfView(EyeFov* fov) override;
+	bool GetEyeSeparation(float* meters) override;
 
 	// Tracking spaces (xrTracking.cpp).
-	bool             LocateHead(uint64_t time, int64_t flip_arg, HeadLocation* location);
-	CoordinateSystem GetCoordinateSystem();
-	bool             SetCoordinateSystem(CoordinateSystem system);
-	bool             ResetLocalCoordinate(const Pose* pose);
-	bool             LocateCoordinateSystem(CoordinateSystem system, Pose* origin);
-	uint32_t         GetPlayAreaUpdateCounter() const { return m_play_area_counter; }
-	bool             GetPlayAreaBounds(PlayAreaBounds* bounds);
-	bool             HasPlayAreaBounds();
+	bool             LocateHead(uint64_t time, int64_t flip_arg, HeadLocation* location) override;
+	CoordinateSystem GetCoordinateSystem() override;
+	bool             SetCoordinateSystem(CoordinateSystem system) override;
+	bool             ResetLocalCoordinate(const Pose* pose) override;
+	bool             LocateCoordinateSystem(CoordinateSystem system, Pose* origin) override;
+	[[nodiscard]] uint32_t GetPlayAreaUpdateCounter() const override { return m_play_area_counter; }
+	bool             GetPlayAreaBounds(PlayAreaBounds* bounds) override;
+	bool             HasPlayAreaBounds() override;
 	// The space a frame was rendered in; falls back to the current coordinate system. The space
 	// stays valid for at least SPACE_GENERATIONS recentres.
 	XrSpace          GetFrameSpace(int64_t flip_arg);
@@ -143,7 +146,12 @@ public:
 	XrSpace          GetWorldSpace() const { return m_raw_local; }
 
 	[[nodiscard]] Input* GetInput() const { return m_input.get(); }
-	bool                 LocateController(Hand hand, uint64_t time, Location* location);
+	bool                 LocateController(Hand hand, uint64_t time, Location* location) override;
+	[[nodiscard]] bool   HasControllerInput() const override { return true; }
+	bool                 GetControllerState(Hand hand, ControllerState* state) override;
+	void                 ResetControllerOrientation(Hand hand) override;
+	void                 SetControllerVibration(Hand hand, float amplitude) override;
+	void                 SetTriggerVibration(Hand hand, const TriggerVibration& vibration) override;
 
 private:
 	// One set of recentred LOCAL and LOCAL_FLOOR spaces.

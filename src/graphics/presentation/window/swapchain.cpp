@@ -345,7 +345,8 @@ private:
 struct Presenter::Impl {
 	explicit Impl(WindowContext& owner)
 	    : renderer(*owner.render_context), window(owner), swapchain(owner),
-	      present_scheduler(renderer, owner.graphic_ctx), frames(owner, present_scheduler) {
+	      present_scheduler(renderer, owner.graphic_ctx), frames(owner, present_scheduler),
+	      hmd_to_openxr(Xr::IsActive()) {
 		EXIT_IF(owner.render_context == nullptr);
 		swapchain.Create();
 		frames.Initialize(swapchain.ImageCount(), swapchain.Format());
@@ -449,7 +450,11 @@ struct Presenter::Impl {
 	// Presents the main window; with mirror, the left eye of the headset panel replaces the
 	// main bus layer.
 	void Present(const HmdMirror* mirror = nullptr);
+	// Shows the newest headset panel. The destination is fixed once the OpenXR fallback is
+	// resolved: the OpenXR runtime's panel, or the SDL headset window for the virtual headset.
 	void PresentHmd();
+	void PresentHmdToOpenxr();
+	void PresentHmdToWindow();
 
 	RenderContext&        renderer;
 	WindowContext&        window;
@@ -462,6 +467,9 @@ struct Presenter::Impl {
 	// Guards the headset layer. The OpenXR frame thread presents headset flips, and must not
 	// wait for the main window's vsync under present_mutex.
 	Common::Mutex hmd_present_mutex;
+	// The OpenXR runtime shows the headset panel; otherwise the SDL headset window does. Fixed at
+	// construction, by when the OpenXR fallback has been resolved.
+	const bool hmd_to_openxr;
 	// Created on the first headset flip, after its window is shown.
 	std::unique_ptr<Swapchain> hmd_swapchain;
 	Layer                      hmd_layer {};
@@ -1341,32 +1349,39 @@ void Presenter::Impl::Present(const HmdMirror* mirror) {
 void Presenter::Impl::PresentHmd() {
 	KYTY_PROFILER_FUNCTION();
 
-	if (Xr::IsActive()) {
-		// The OpenXR frame thread shows the newest panel at the headset's own rate.
-		auto* frame = hmd_layer.frame;
-		EXIT_IF(frame == nullptr);
-		Xr::PanelView view {};
-		for (uint32_t eye = 0; eye < 2; eye++) {
-			const auto& f = frame->hmd_fov[eye];
-			view.fov[eye] = {f.tan_out, f.tan_in, f.tan_top, f.tan_bottom};
-		}
-		const auto& pose = frame->hmd_pose;
-		view.pose        = {pose.position, pose.orientation};
-		view.flip_arg    = pose.flip_arg;
-		view.world_locked = pose.valid && !pose.head_locked;
-		{
-			Common::LockGuard render_lock(renderer.GetMutex());
-			auto&             command = present_scheduler.BeginCommand();
-			frame->Transit(command.Handle(), vk::ImageLayout::eTransferSrcOptimal,
-			               vk::AccessFlagBits2::eTransferRead);
-			Xr::RecordPanelCopy(command.Handle(), frame->image.image, frame->image.format,
-			                    {frame->image.extent.width, frame->image.extent.height}, view);
-			frame->present_tick = present_scheduler.Submit();
-		}
-		Xr::PanelCopySubmitted();
-		return;
+	if (hmd_to_openxr) {
+		PresentHmdToOpenxr();
+	} else {
+		PresentHmdToWindow();
 	}
+}
 
+void Presenter::Impl::PresentHmdToOpenxr() {
+	// The OpenXR frame thread shows the newest panel at the headset's own rate.
+	auto* frame = hmd_layer.frame;
+	EXIT_IF(frame == nullptr);
+	Xr::PanelView view {};
+	for (uint32_t eye = 0; eye < 2; eye++) {
+		const auto& f = frame->hmd_fov[eye];
+		view.fov[eye] = {f.tan_out, f.tan_in, f.tan_top, f.tan_bottom};
+	}
+	const auto& pose  = frame->hmd_pose;
+	view.pose         = {pose.position, pose.orientation};
+	view.flip_arg     = pose.flip_arg;
+	view.world_locked = pose.valid && !pose.head_locked;
+	{
+		Common::LockGuard render_lock(renderer.GetMutex());
+		auto&             command = present_scheduler.BeginCommand();
+		frame->Transit(command.Handle(), vk::ImageLayout::eTransferSrcOptimal,
+		               vk::AccessFlagBits2::eTransferRead);
+		Xr::RecordPanelCopy(command.Handle(), frame->image.image, frame->image.format,
+		                    {frame->image.extent.width, frame->image.extent.height}, view);
+		frame->present_tick = present_scheduler.Submit();
+	}
+	Xr::PanelCopySubmitted();
+}
+
+void Presenter::Impl::PresentHmdToWindow() {
 	auto* target = window.vr_window.get();
 	EXIT_IF(target == nullptr || hmd_layer.frame == nullptr);
 	if (hmd_swapchain == nullptr) {

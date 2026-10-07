@@ -466,9 +466,7 @@ static Graphics::Xr::Hand VrControllerHand(int handle) {
 }
 
 static void SetVrTriggerVibration(int handle, const Graphics::Xr::TriggerVibration& vibration) {
-	if (Graphics::Xr::IsActive()) {
-		Graphics::Xr::SetTriggerVibration(VrControllerHand(handle), vibration);
-	}
+	Graphics::Xr::SetTriggerVibration(VrControllerHand(handle), vibration);
 }
 
 void Initialize() {
@@ -1499,7 +1497,9 @@ int KYTY_SYSV_ABI PadVrControllerReadState(int handle, PadVrControllerData* data
 	if (data == nullptr) {
 		return PAD_ERROR_INVALID_ARG;
 	}
-	if (Graphics::Xr::IsActive()) {
+	// The virtual headset's Sense pads have no input of their own, so the host gamepad is mapped
+	// onto them below; real OpenXR controllers report their own buttons.
+	if (Graphics::Xr::HasControllerInput()) {
 		PadReadXrController(handle, data);
 		return OK;
 	}

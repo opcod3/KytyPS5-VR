@@ -874,6 +874,9 @@ static void WindowCreate(WindowContext& context) {
 
 void WindowContext::CreateVrWindow() {
 	EXIT_IF(vr_window != nullptr);
+	// OpenXR is not the headset here (VR mode is virtual, or OpenXR was unavailable), so the
+	// virtual headset backs the PSVR2 and this window shows its output.
+	Xr::InitializeVirtual();
 	// Stays hidden until the guest flips to the headset output.
 	auto secondary    = std::make_unique<SecondaryWindow>();
 	secondary->window = SDL_CreateWindow(

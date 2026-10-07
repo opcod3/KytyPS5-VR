@@ -197,17 +197,13 @@ PadVrControllerGetDeviceInformation(int handle, PadVrControllerDeviceInformation
 	info->hand_type       = (handle == Controller::PAD_HANDLE_VR_CONTROLLER_LEFT ? hand_type_left
 	                                                                             : hand_type_right);
 	info->stick_dead_zone = Controller::controller_get_axis(-32768, 32767, 8000) - 128;
-	info->connected_count = 1;
-	info->connected       = true;
-	if (Graphics::Xr::IsActive()) {
-		Graphics::Xr::ControllerState state;
-		(void)Graphics::Xr::GetControllerState(handle == Controller::PAD_HANDLE_VR_CONTROLLER_LEFT
-		                                           ? Graphics::Xr::Hand::Left
-		                                           : Graphics::Xr::Hand::Right,
-		                                       &state);
-		info->connected_count = static_cast<uint8_t>(state.connected_count);
-		info->connected       = state.connected;
-	}
+	Graphics::Xr::ControllerState state;
+	(void)Graphics::Xr::GetControllerState(handle == Controller::PAD_HANDLE_VR_CONTROLLER_LEFT
+	                                           ? Graphics::Xr::Hand::Left
+	                                           : Graphics::Xr::Hand::Right,
+	                                       &state);
+	info->connected_count = static_cast<uint8_t>(state.connected_count);
+	info->connected       = state.connected;
 
 	return OK;
 }

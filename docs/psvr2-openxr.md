@@ -16,10 +16,16 @@ struct layouts and behavioural rules are checked against the OpenXR 1.1.60 heade
 
 ## 0. Status (2026-10-07)
 
-Phases 1–4 of §9 are implemented and were checked by hand against Monado (simulated and
+Phases 1–4 and 6 of §9 are implemented and were checked by hand against Monado (simulated and
 `qwerty` devices) with Horizon Call of the Mountain (`PPSA05666`). Head tracking, world-locked
-reprojection, controllers and the headset's own video-out clock work. Phases 5–6 are open; §11
+reprojection, controllers and the headset's own video-out clock work. Phase 5 is open; §11
 says where to pick up.
+
+Phase 6 (the headset-interface refactor) made the virtual headset work through the same `Headset`
+interface as OpenXR (`xr/xrHeadset.h`, `xr/xrVirtual.cpp`, `xr/xrHeadset.cpp`), so the HLE code and
+the video-out bus no longer branch on the VR mode. The HMD2 bus is always on the headset clock
+(the OpenXR frame thread, or the virtual headset's own vblank thread). `Xr::IsActive()` now means
+only "OpenXR is the headset"; `Xr::HasHeadset()` means a headset exists at all. See §11.
 
 What `--vr-mode openxr` does today:
 
@@ -548,7 +554,7 @@ package, and add `openxr-loader` to `nix/devshell.nix`.
 Each phase can be tested on its own. Monado (`monado-service` with the `qwerty` or simulated
 driver) gives a headset-free test loop on Linux; SteamVR null driver is the alternative.
 
-Status: 1–4 done (with the deviations in §0); 5 and 6 open. The
+Status: 1–4 and 6 done (with the deviations in §0); 5 open. The
 *done when* checks were made with Horizon Call of the Mountain on Monado, not with the SDK
 samples named below.
 
@@ -577,9 +583,14 @@ samples named below.
 5. **Layers and extras.** Add UI2D/VR2D quads, blend flags, mirroring, `GetStatus`, user events,
    60→120 sync mode, refresh-rate requests, gaze, play-area queries (done with phase 2), the
    setup dialog, and the missing pad NIDs.
-6. **Retire the virtual path's coupling.** The virtual mode keeps working through the same
-   interfaces, through an `XrRuntime`-shaped fake. Drop the special cases in `videoOut.cpp` and
-   `swapchain.cpp`.
+6. **[done] Retire the virtual path's coupling.** A `Headset` interface
+   (`xr/xrHeadset.h`) backs the PSVR2; `Runtime` (OpenXR) and `VirtualHeadset` (`xr/xrVirtual.cpp`,
+   fixed poses and a vblank thread) both implement it, and the public `Xr::` functions in
+   `xr/xrHeadset.cpp` dispatch to whichever exists. The HLE code calls those functions
+   unconditionally; `Xr::HasHeadset()`/`Xr::HasControllerInput()` replace the old
+   `Xr::IsActive()` branches. The HMD2 video-out bus is always on the headset clock, and the
+   presenter fixes its headset target (OpenXR panel vs SDL window) at construction. `Xr::IsActive()`
+   now means only "OpenXR is the headset", used for Vulkan/session setup and that presenter choice.
 
 ---
 
@@ -612,20 +623,29 @@ samples named below.
 
 | File | Role |
 |---|---|
-| `src/graphics/presentation/xr/xrRuntime.h` | Public, OpenXR-free API used by HLE and the presenter. Stubs exist for builds without the loader. |
-| `xr/xrInternal.h` | `Runtime` class: instance, session, spaces, clock, panel, display slots. Only compiled with `KYTY_OPENXR`. |
-| `xr/xrRuntime.cpp` | Instance/system/session, events, panel copy, public wrappers. |
+| `src/graphics/presentation/xr/xrRuntime.h` | Public, OpenXR-free API used by HLE and the presenter. Declares the headset functions, `Xr::IsActive`, `Xr::HasHeadset` and `Xr::InitializeVirtual`. |
+| `xr/xrHeadset.h` | `Headset` interface (the methods the public functions run on) plus `GetRuntimeHeadset`/`ShutdownRuntime`/`CreateVirtualHeadset`. Always compiled. |
+| `xr/xrHeadset.cpp` | The public `Xr::` headset functions: dispatch to the OpenXR runtime if there is one, else the virtual headset. Owns the virtual headset; `Shutdown` destroys both. Always compiled. |
+| `xr/xrVirtual.cpp` | `VirtualHeadset`: fixed poses, 63 mm eyes, 2 m play area, and a vblank thread at the requested rate. Its Sense pads report no input (`HasControllerInput()` false). Always compiled. |
+| `xr/xrInternal.h` | `Runtime : public Headset`: instance, session, spaces, clock, panel, display slots. Only compiled with `KYTY_OPENXR`. |
+| `xr/xrRuntime.cpp` | Instance/system/session, events, panel copy; `Runtime` controller forwards; `GetRuntimeHeadset`/`ShutdownRuntime` and the no-OpenXR stubs. |
 | `xr/xrFrameThread.cpp` | `xrWaitFrame`/`BeginFrame`/`EndFrame` loop, swapchain, per-frame copy, projection layer, action sync, clock recalibration. |
 | `xr/xrTracking.cpp` | Reference spaces, recentre generations, head/controller locate, play area. |
-| `xr/xrClock.cpp` | Guest µs ↔ `XrTime`, display slots for `flipArg`, cached eye views. |
+| `xr/xrClock.cpp` | Guest µs ↔ `XrTime`, display slots for `flipArg`, cached eye views, `Runtime` FOV/eye separation. |
 | `xr/xrInput.cpp` | Action set, bindings, per-frame controller state, IMU estimate, haptics. |
 | `xr/xrMath.cpp` | Pose and quaternion helpers. |
-| `libs/libHmd2.cpp`, `libs/libVrTracker2.cpp`, `libs/controller.cpp`, `libs/libPad.cpp` | HLE; each branches on `Graphics::Xr::IsActive()` and keeps the virtual-headset path. |
-| `graphics/presentation/window/swapchain.cpp` (`PresentHmd`) | Hands panels to OpenXR instead of the SDL window. |
-| `graphics/presentation/videoOut.cpp` (`HeadsetVblank`, `FlipQueue::Flip`) | HMD2 port vblanks and flips on the frame thread. |
+| `libs/libHmd2.cpp`, `libs/libVrTracker2.cpp`, `libs/controller.cpp`, `libs/libPad.cpp` | HLE; calls the `Xr::` functions unconditionally, gating on `Xr::HasHeadset()`/`Xr::HasControllerInput()` where the headset may be absent or input-less. |
+| `graphics/presentation/window/window.cpp` (`CreateVrWindow`) | Creates the virtual headset (`Xr::InitializeVirtual()`) and its SDL window when OpenXR is not the headset. |
+| `graphics/presentation/window/swapchain.cpp` (`PresentHmd`) | Fixes its headset target at construction (`hmd_to_openxr`): `PresentHmdToOpenxr` (panel copy) or `PresentHmdToWindow` (SDL window). |
+| `graphics/presentation/videoOut.cpp` (`HeadsetVblank`, `FlipQueue::Flip`) | The HMD2 port is always on the headset clock, driven by the OpenXR frame thread or the virtual vblank thread. |
+
+`Xr::IsActive()` means "the OpenXR runtime is the headset"; it is only used for Vulkan
+instance/device/session creation and the presenter's headset target. `Xr::HasHeadset()` means a
+headset exists at all (OpenXR or virtual).
 
 Build: `KYTY_ENABLE_OPENXR` (default on) finds the system `OpenXR` CMake package and defines
-`KYTY_OPENXR`. Without it everything compiles to stubs and `--vr-mode openxr` falls back.
+`KYTY_OPENXR`. Without it the OpenXR runtime compiles to stubs (the headset interface, virtual
+headset and dispatch stay) and `--vr-mode openxr` falls back to the virtual headset.
 `--vr` still means `--vr-mode virtual`.
 
 ### Testing with Monado on this machine
@@ -692,6 +712,13 @@ Build: `KYTY_ENABLE_OPENXR` (default on) finds the system `OpenXR` CMake package
   and the layer layout whenever it changes.
 - Horizon queries the FOV right after `sceHmd2Open`. By then the session is normally focused and
   the eye views are cached; if not, the ER15 defaults are returned.
+- Monado's compositor runs at ~30 fps with the Qwerty HMD for any client (`hello_xr` too), while
+  the emulator submits 60 frames a second. The bottleneck is Monado's preview window
+  (`renderer_wait_for_present` warnings), not our code.
+- A PS5 capture could not pin down the real mirror crop: the eye-tracking hint bar is placed in
+  the world, so its size depends on where the player stands. A capture of the calibration screen
+  right after launch would work. The current `CENTER` crop is an upper bound (the widest view that
+  never shows the lens mask).
 
 ### Where to pick up
 

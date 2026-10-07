@@ -8,8 +8,10 @@
 #include <cstdint>
 #include <functional>
 
-// Host OpenXR runtime that backs the PSVR2 headset in VR mode openxr. The interface is free of
-// OpenXR types so that HLE code and builds without the OpenXR loader can use it.
+// The headset that backs the PSVR2: a host OpenXR runtime in VR mode openxr, or a virtual
+// headset with fixed poses and a desktop window. HLE code uses the headset functions below the
+// same way for both. The interface is free of OpenXR types so that builds without the OpenXR
+// loader can use it.
 //
 // Poses use the PS5 and OpenXR convention: right-handed, Y up, -Z forward, metres, quaternions
 // as x, y, z, w. Times are guest process time in microseconds.
@@ -126,10 +128,14 @@ struct PlayAreaBounds {
 // XR_KHR_vulkan_enable2 creates the Vulkan instance and device. Returns false when there is no
 // usable runtime or headset; the reason is logged.
 bool Initialize();
-// Initialize succeeded and Shutdown has not run.
+// Initialize succeeded and Shutdown has not run: the OpenXR runtime is the headset.
 bool IsActive();
-// Destroys the instance. Runs after the Vulkan instance is destroyed.
+// Sets up the virtual headset, used when VR mode is virtual or OpenXR is unavailable.
+void InitializeVirtual();
+// Destroys the headset. Runs after the Vulkan instance is destroyed.
 void Shutdown();
+// There is a headset, OpenXR or virtual.
+[[nodiscard]] bool HasHeadset();
 
 // XR_KHR_vulkan_enable2 replacements for vkCreateInstance, physical device selection, and
 // vkCreateDevice. The runtime appends the extensions it needs to the create infos.
@@ -185,6 +191,9 @@ bool GetPlayAreaBounds(PlayAreaBounds* bounds);
 bool HasPlayAreaBounds();
 
 // Controllers. State is sampled once per headset frame; poses are located on demand.
+// The controllers have buttons of their own. The virtual headset's do not; the pad library maps
+// the host gamepad onto them.
+[[nodiscard]] bool HasControllerInput();
 bool GetControllerState(Hand hand, ControllerState* state);
 // Locates a controller's grip at a guest time (0 means now) in the current coordinate system.
 bool LocateController(Hand hand, uint64_t time, Location* location);
@@ -204,9 +213,10 @@ void RecordPanelCopy(vk::CommandBuffer command, vk::Image source, vk::Format for
                      vk::Extent2D extent, const PanelView& view);
 void PanelCopySubmitted();
 
-// Clock of the guest's HMD2 video-out bus. The frame thread calls the handler once per headset
-// refresh, right after xrWaitFrame, and about 90 times a second while the session is not running.
-// Replacing the handler waits until a call in progress has returned.
+// Clock of the guest's HMD2 video-out bus: the handler runs once per headset refresh. With OpenXR
+// the frame thread calls it right after xrWaitFrame, and about 90 times a second while the
+// session is not running; the virtual headset calls it at the requested refresh rate. Replacing
+// the handler waits until a call in progress has returned.
 void SetVblankHandler(std::function<void()> handler);
 
 } // namespace Libs::Graphics::Xr
