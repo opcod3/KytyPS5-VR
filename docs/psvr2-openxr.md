@@ -18,7 +18,8 @@ struct layouts and behavioural rules are checked against the OpenXR 1.1.60 heade
 
 Phases 1–4 of §9 are implemented and were checked by hand against Monado (simulated and
 `qwerty` devices) with Horizon Call of the Mountain (`PPSA05666`). Head tracking, world-locked
-reprojection and controllers work. Phases 5–6 are open; §11 says where to pick up.
+reprojection, controllers and the headset's own video-out clock work. Phases 5–6 are open; §11
+says where to pick up.
 
 What `--vr-mode openxr` does today:
 
@@ -31,6 +32,10 @@ What `--vr-mode openxr` does today:
   that into an sRGB swapchain every XR frame and submits one projection layer. The layer is
   world-locked in the space the frame was rendered in, using the pose and FOV from `SetParam`;
   `disableReprojection` or a missing pose gives a head-locked layer in `VIEW`.
+- **HMD2 bus clock** (`videoOut.cpp`, `Xr::SetVblankHandler`). Right after each `xrWaitFrame`,
+  the frame thread fires the HMD2 port's pre-vblank and vblank events and completes its oldest
+  ready flip, so the guest flips at the headset rate and the new panel goes out in that XR frame.
+  The main present thread no longer touches that port.
 - **Tracking** (`xr/xrTracking.cpp`, `xr/xrClock.cpp`). `sceVrTracker2GetResult` for the HMD and
   controllers, coordinate systems, recentre, `LocateCoordinateSystem` and the play-area calls.
   `sceHmd2GetFieldOfView`, device status, mount state and lens separation come from the runtime.
@@ -56,6 +61,11 @@ Deliberate deviations from the plan below:
 - Controller `devicePose` is the grip pose with no per-profile offset (§5.4); nothing looked off
   in Horizon, so no calibration was done.
 - Recentring ignores `coordinateResetType` (head and device reset behave the same).
+- The HMD2 bus shares `FlipQueue` with the other buses rather than having its own queue (§4.4).
+  Each request records its clock, and `Flip(micros, headset)` takes only that clock's groups. A
+  flip master/slave pair across the two clocks `EXIT_NOT_IMPLEMENTED`s.
+- While the session is not running, the frame thread still fires HMD2 vblanks about every
+  11 ms, so a guest waiting on them does not hang.
 - Windows: `Xr::Initialize` refuses, because guest-time conversion needs
   `XR_KHR_win32_convert_performance_counter_time`, which is not implemented.
 
@@ -278,8 +288,8 @@ warp, so `enableFsrReprojection` sources are already linear and the LUTs go unus
 | `sceVideoOutGetVblankStatus` / `GetFlipStatus` on HMD2 | Counters and times from the frame thread; times converted with `XrClock`. |
 | `SCE_VIDEO_OUT_REFRESH_RATE_89_91HZ` (35) | Report it when the runtime rate is about 90 Hz, and `119_88HZ` when it is about 120 Hz. |
 
-`FlipQueue` currently has a single clock, `Flip(0)` on the main present thread. The HMD2 bus
-needs its own queue and its own clock, driven by the frame thread.
+`FlipQueue` serves both clocks: the main present thread calls `Flip(0, false)`, and with an
+OpenXR headset the frame thread calls `Flip(0, true)` for the HMD2 port (see §0).
 
 ### 4.5 `libSceVrTracker2` (`vision/vr_tracker2.h`)
 
@@ -516,7 +526,7 @@ package, and add `openxr-loader` to `nix/devshell.nix`.
 Each phase can be tested on its own. Monado (`monado-service` with the `qwerty` or simulated
 driver) gives a headset-free test loop on Linux; SteamVR null driver is the alternative.
 
-Status: 1, 2 and 4 done, 3 mostly done (with the deviations in §0); 5 and 6 open. The
+Status: 1–4 done (with the deviations in §0); 5 and 6 open. The
 *done when* checks were made with Horizon Call of the Mountain on Monado, not with the SDK
 samples named below.
 
@@ -530,11 +540,10 @@ samples named below.
    `GetPredictedDisplayTime` use frame-thread slots.
    *Done when:* in `api_vr_tracker2`, the logged poses follow the headset, and LOCAL/STAGE
    switching and reset work.
-3. **[mostly done] Display.** Give the HMD2 bus its own flip queue and the frame thread as its
+3. **[done] Display.** Give the HMD2 bus its own flip queue and the frame thread as its
    clock. Make the panel image per-eye layered; add the sRGB swapchain and per-flip VR3D
    projection layers with pose and FOV from `SetParam`. Fire HMD2 vblank and flip events from the
-   frame thread. *Still open:* the bus's own flip queue and the vblank/flip events, which still
-   run on the main vblank clock (§11).
+   frame thread.
    *Done when:* `tutorial_vr2/01-basic-vr` renders correctly in the headset with stable
    world-locked geometry. Rotating your head after a stalled frame should show runtime
    reprojection rather than swimming.
@@ -591,6 +600,7 @@ samples named below.
 | `xr/xrMath.cpp` | Pose and quaternion helpers. |
 | `libs/libHmd2.cpp`, `libs/libVrTracker2.cpp`, `libs/controller.cpp`, `libs/libPad.cpp` | HLE; each branches on `Graphics::Xr::IsActive()` and keeps the virtual-headset path. |
 | `graphics/presentation/window/swapchain.cpp` (`PresentHmd`) | Hands panels to OpenXR instead of the SDL window. |
+| `graphics/presentation/videoOut.cpp` (`HeadsetVblank`, `FlipQueue::Flip`) | HMD2 port vblanks and flips on the frame thread. |
 
 Build: `KYTY_ENABLE_OPENXR` (default on) finds the system `OpenXR` CMake package and defines
 `KYTY_OPENXR`. Without it everything compiles to stubs and `--vr-mode openxr` falls back.
@@ -641,6 +651,13 @@ Build: `KYTY_ENABLE_OPENXR` (default on) finds the system `OpenXR` CMake package
   (`SPACE_GENERATIONS`), so frames rendered before a recentre are still submitted in their own
   space (§5.1). Guest-thread locates take `m_spaces_mutex`, which also makes destroying old
   spaces safe.
+- The frame thread runs the guest's HMD2 flips, so it takes the renderer lock in `PresentHmd`
+  (once per draw or dispatch at worst) and `Presenter::Impl::hmd_present_mutex`. It must not take
+  `present_mutex`, because the main present holds that across the window's vsync. Lock order:
+  renderer → `Panel::mutex` → `queue_mutex`.
+- Monado's Qwerty HMD refreshes at 60 Hz, the same as the default `--vblank-frequency`. To see
+  that the HMD2 bus follows the headset, run with `--vblank-frequency 30`: Horizon still flips the
+  headset about 60 times a second.
 - Horizon queries the FOV right after `sceHmd2Open`. By then the session is normally focused and
   the eye views are cached; if not, the ER15 defaults are returned.
 
@@ -648,22 +665,19 @@ Build: `KYTY_ENABLE_OPENXR` (default on) finds the system `OpenXR` CMake package
 
 In rough order of value:
 
-1. **HMD2 bus clock (rest of phase 3).** `FlipQueue` still completes HMD2 flips and fires HMD2
-   vblank events on the main present thread. Give bus `0x20` its own queue, completed by the frame
-   thread when it takes a panel, and fire `sceVideoOutAddVblankEvent` HMD2 events from
-   `xrWaitFrame` (§4.4). Do this before `SetRenderConfig` 60→120.
-2. **UI2D/VR2D layers (phase 5).** `Hmd2Composition` still `EXIT_NOT_IMPLEMENTED`s on them.
+1. **UI2D/VR2D layers (phase 5).** `Hmd2Composition` still `EXIT_NOT_IMPLEMENTED`s on them.
    Store UI2D placement in `LayerSetting`, give each its own quad swapchain, and submit
    `XrCompositionLayerQuad` after the projection layer (§4.3). Find a title that uses them first.
-3. **`GetStatus`, user events, mirroring, `SetRenderConfig`, refresh-rate requests**
-   (`XR_FB_display_refresh_rate` is already enabled when present). See §4.2.
-4. **Gaze** via `XR_EXT_eye_gaze_interaction` (enabled when present; nothing reads it yet).
-5. **`scePadVrControllerRead` / `ReadCombinedState`.** NIDs still need computing; build them from
+2. **`GetStatus`, user events, mirroring, `SetRenderConfig`, refresh-rate requests**
+   (`XR_FB_display_refresh_rate` is already enabled when present). See §4.2. For
+   `RENDER60_AT_REPROJECTION120`, have `HeadsetVblank` skip every second XR frame.
+3. **Gaze** via `XR_EXT_eye_gaze_interaction` (enabled when present; nothing reads it yet).
+4. **`scePadVrControllerRead` / `ReadCombinedState`.** NIDs still need computing; build them from
    `Input`'s cached state.
-6. **Trigger effects** on the Sense controllers (`scePadVrControllerSetTriggerEffects` only logs);
+5. **Trigger effects** on the Sense controllers (`scePadVrControllerSetTriggerEffects` only logs);
    map the vibration modes to `Xr::SetControllerVibration`.
-7. **Windows** time conversion (`XR_KHR_win32_convert_performance_counter_time`), then remove the
+6. **Windows** time conversion (`XR_KHR_win32_convert_performance_counter_time`), then remove the
    refusal in `Runtime::CreateInstance`.
-8. **Untested:** SteamVR (§10), real hardware, a runtime without `LOCAL_FLOOR`
+7. **Untested:** SteamVR (§10), real hardware, a runtime without `LOCAL_FLOOR`
    (the 1.6 m fallback in `CreateOffsetSpace`), recentre in a game, and play-area queries on a
    runtime that reports bounds.

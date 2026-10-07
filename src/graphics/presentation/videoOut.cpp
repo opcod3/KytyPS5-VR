@@ -17,6 +17,7 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/presentation/presenter.h"
 #include "graphics/presentation/renderDoc.h"
+#include "graphics/presentation/xr/xrRuntime.h"
 #include "kernel/pthread.h"
 #include "libs/errno.h"
 #include "libs/hmd2.h"
@@ -260,9 +261,12 @@ struct VideoOutConfig {
 	std::array<BufferAttributeGroup, VIDEO_OUT_BUFFER_ATTRIBUTE_NUM_MAX> groups;
 };
 
+// Pending flips of all ports. There are two clocks: the present thread flips everything except
+// the headset port of an OpenXR headset, which the OpenXR frame thread flips.
 class FlipQueue {
 public:
-	explicit FlipQueue(Graphics::Presenter& presenter): m_presenter(presenter) {
+	FlipQueue(Graphics::Presenter& presenter, bool headset_clock)
+	    : m_presenter(presenter), m_headset_clock(headset_clock) {
 		EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
 	}
 	~FlipQueue();
@@ -274,7 +278,8 @@ public:
 	void Prepare(uint64_t request_id, Graphics::CommandBuffer& buffer);
 	void Complete(uint64_t request_id);
 	void WaitForSubmitSlot(VideoOutConfig& cfg);
-	bool Flip(uint32_t micros);
+	// Presents the oldest ready flip group of one clock.
+	bool Flip(uint32_t micros, bool headset);
 	void GetFlipStatus(VideoOutConfig& cfg, VideoOutFlipStatus& out);
 	void Wait(VideoOutConfig& cfg, int index);
 
@@ -294,9 +299,11 @@ private:
 		RequestState                state;
 		Graphics::Presenter::Frame* frame;
 		bool                        premultiplied_alpha;
+		bool                        headset;
 	};
 
 	Graphics::Presenter& m_presenter;
+	const bool           m_headset_clock;
 	Common::Mutex        m_mutex;
 	Common::CondVar      m_submit_cond_var;
 	Common::CondVar      m_submit_slot_cond_var;
@@ -304,7 +311,6 @@ private:
 	std::list<Request>   m_requests;
 	std::list<Request>   m_cpu_requests;
 	std::list<Request>   m_cancelled_requests;
-	bool                 m_processing      = false;
 	uint64_t             m_next_request_id = 1;
 };
 
@@ -318,10 +324,14 @@ public:
 	static constexpr int VIDEO_OUT_NUM_MAX = VIDEO_OUT_BUSES.size() + 1;
 
 	Impl(uint32_t width, uint32_t height, Graphics::Presenter& presenter)
-	    : m_renderer(presenter.Renderer()), m_presenter(presenter), m_flip_queue(presenter) {
+	    : m_renderer(presenter.Renderer()), m_presenter(presenter),
+	      m_headset_clock(Graphics::Xr::IsActive()), m_flip_queue(presenter, m_headset_clock) {
 		EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
 		Init(width, height);
 		m_present_thread = std::jthread([this](std::stop_token token) { PresentThread(token); });
+		if (m_headset_clock) {
+			Graphics::Xr::SetVblankHandler([this] { HeadsetVblank(); });
+		}
 	}
 	~Impl();
 	KYTY_CLASS_NO_COPY(Impl);
@@ -338,15 +348,23 @@ public:
 	Graphics::RenderContext& Renderer() const noexcept { return m_renderer; }
 	bool                     IsHdrSupported() const noexcept { return m_presenter.IsHdrSupported(); }
 
-	void VblankBegin();
-	void VblankEnd();
+	// Vblank of the ports on one clock; see FlipQueue.
+	void VblankBegin(bool headset);
+	void VblankEnd(bool headset);
 	void PresentThread(std::stop_token token);
+	void HeadsetVblank();
 
 private:
+	[[nodiscard]] bool OnHeadsetClock(const VideoOutConfig& cfg) const {
+		return m_headset_clock && cfg.bus == VIDEO_OUT_BUS_TYPE_HMD2_MAIN;
+	}
+
 	Common::Mutex            m_mutex;
 	VideoOutConfig           m_video_out_ctx[VIDEO_OUT_NUM_MAX];
 	Graphics::RenderContext& m_renderer;
 	Graphics::Presenter&     m_presenter;
+	// The headset port follows the OpenXR headset's refresh instead of the main vblank.
+	const bool               m_headset_clock;
 	FlipQueue                m_flip_queue;
 	std::jthread             m_present_thread;
 };
@@ -747,6 +765,9 @@ void VideoOutShutdown() {
 }
 
 VideoOutDriver::Impl::~Impl() {
+	if (m_headset_clock) {
+		Graphics::Xr::SetVblankHandler(nullptr);
+	}
 	if (m_present_thread.joinable()) {
 		m_present_thread.request_stop();
 		m_present_thread.join();
@@ -927,6 +948,8 @@ int VideoOutDriver::Impl::SetFlipMaster(int slave_handle, int master_handle) {
 	if (slave.master != nullptr || slave.slave_count != 0 || master.master != nullptr) {
 		return VIDEO_OUT_ERROR_UNSUPPORTED_OPERATION;
 	}
+	// A flip group is presented by one clock.
+	EXIT_NOT_IMPLEMENTED(OnHeadsetClock(slave) != OnHeadsetClock(master));
 	if (slave.flip_status.flipPendingNum != 0 || master.flip_status.flipPendingNum != 0) {
 		return VIDEO_OUT_ERROR_RESOURCE_BUSY;
 	}
@@ -935,12 +958,12 @@ int VideoOutDriver::Impl::SetFlipMaster(int slave_handle, int master_handle) {
 	return OK;
 }
 
-void VideoOutDriver::Impl::VblankBegin() {
+void VideoOutDriver::Impl::VblankBegin(bool headset) {
 	Common::LockGuard lock(m_mutex);
 
 	for (int i = 1; i < VIDEO_OUT_NUM_MAX; i++) {
 		auto& ctx = m_video_out_ctx[i];
-		if (ctx.opened) {
+		if (ctx.opened && OnHeadsetClock(ctx) == headset) {
 			ctx.mutex.Lock();
 			ctx.pre_vblank_status.count++;
 			ctx.pre_vblank_status.processTime        = LibKernel::KernelGetProcessTime();
@@ -954,12 +977,12 @@ void VideoOutDriver::Impl::VblankBegin() {
 	}
 }
 
-void VideoOutDriver::Impl::VblankEnd() {
+void VideoOutDriver::Impl::VblankEnd(bool headset) {
 	Common::LockGuard lock(m_mutex);
 
 	for (int i = 1; i < VIDEO_OUT_NUM_MAX; i++) {
 		auto& ctx = m_video_out_ctx[i];
-		if (ctx.opened) {
+		if (ctx.opened && OnHeadsetClock(ctx) == headset) {
 			ctx.mutex.Lock();
 			ctx.vblank_status.count++;
 			ctx.vblank_status.processTime        = LibKernel::KernelGetProcessTime();
@@ -1004,8 +1027,8 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 			continue;
 		}
 
-		VblankBegin();
-		bool presented = m_flip_queue.Flip(0);
+		VblankBegin(false);
+		bool presented = m_flip_queue.Flip(0, false);
 		if (!presented && m_presenter.NeedsSystemOverlayRefresh()) {
 			if (m_presenter.PresentLastFrame()) {
 				presented = true;
@@ -1039,11 +1062,21 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 				m_presenter.Present(blank);
 			}
 		}
-		VblankEnd();
+		VblankEnd(false);
 
 		const auto frame_end = Common::Timer::QueryPerformanceCounter();
 		total_wait += static_cast<int64_t>(period) - static_cast<int64_t>(frame_end - frame_begin);
 	}
+}
+
+// Runs on the OpenXR frame thread. The headset keeps showing its last panel while paused.
+void VideoOutDriver::Impl::HeadsetVblank() {
+	if (m_presenter.IsGuestPaused()) {
+		return;
+	}
+	VblankBegin(true);
+	(void)m_flip_queue.Flip(0, true);
+	VblankEnd(true);
 }
 
 bool FlipQueue::Reserve(VideoOutConfig& cfg, int index, int64_t flip_arg, FlipRequestSource source,
@@ -1087,6 +1120,7 @@ bool FlipQueue::Reserve(VideoOutConfig& cfg, int index, int64_t flip_arg, FlipRe
 	r.submit_ptc = LibKernel::KernelGetProcessTimeCounter();
 	r.source     = source;
 	r.state      = RequestState::Reserved;
+	r.headset    = m_headset_clock && cfg.bus == VIDEO_OUT_BUS_TYPE_HMD2_MAIN;
 	if (cfg.slave_count != 0) {
 		for (auto* queue: {&m_requests, &m_cpu_requests}) {
 			for (auto& slave: *queue) {
@@ -1122,9 +1156,9 @@ FlipQueue::~FlipQueue() {
 void FlipQueue::Cancel(VideoOutConfig& cfg) {
 	std::vector<Graphics::Presenter::Frame*> frames;
 	m_mutex.Lock();
-	while (m_processing && std::any_of(m_requests.begin(), m_requests.end(), [&cfg](const auto& r) {
-		       return r.cfg == &cfg && r.state == RequestState::Presenting;
-	       })) {
+	while (std::any_of(m_requests.begin(), m_requests.end(), [&cfg](const auto& r) {
+		return r.cfg == &cfg && r.state == RequestState::Presenting;
+	})) {
 		m_done_cond_var.Wait(&m_mutex);
 	}
 	for (auto* queue: {&m_requests, &m_cpu_requests}) {
@@ -1337,16 +1371,17 @@ void FlipQueue::Wait(VideoOutConfig& cfg, int index) {
 	}
 }
 
-bool FlipQueue::Flip(uint32_t micros) {
+bool FlipQueue::Flip(uint32_t micros, bool headset) {
 	KYTY_PROFILER_BLOCK("FlipQueue::Flip");
 
 	m_mutex.Lock();
 	if (m_requests.empty()) {
 		m_submit_cond_var.WaitFor(&m_mutex, micros);
 	}
-	EXIT_IF(m_processing);
-	const auto owner = std::find_if(m_requests.begin(), m_requests.end(),
-	                               [](const auto& r) { return r.group == r.id; });
+	const auto owner =
+	    std::find_if(m_requests.begin(), m_requests.end(), [headset](const auto& r) {
+		    return r.group == r.id && r.headset == headset;
+	    });
 	if (owner == m_requests.end()) {
 		m_mutex.Unlock();
 		return false;
@@ -1369,7 +1404,6 @@ bool FlipQueue::Flip(uint32_t micros) {
 			requests[count++] = request;
 		}
 	}
-	m_processing = true;
 	m_mutex.Unlock();
 
 	// Lock each port in bus order, then present and complete the whole group at one Vblank.
@@ -1412,7 +1446,6 @@ bool FlipQueue::Flip(uint32_t micros) {
 		TriggerVideoOutEvents(*r.cfg, VideoOutEventKind::Flip, reinterpret_cast<void*>(r.flip_arg));
 		it = m_requests.erase(it);
 	}
-	m_processing = false;
 	m_done_cond_var.SignalAll();
 	m_submit_slot_cond_var.SignalAll();
 	m_mutex.Unlock();

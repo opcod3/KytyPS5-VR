@@ -14,6 +14,7 @@
 #include <atomic>
 #include <ctime>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -65,6 +66,10 @@ public:
 	void RecordPanelCopy(vk::CommandBuffer command, vk::Image source, vk::Format format,
 	                     vk::Extent2D extent, const PanelView& view);
 	void PanelCopySubmitted();
+
+	void SetVblankHandler(std::function<void()> handler);
+	// Runs the vblank handler. Frame thread only.
+	void Vblank();
 
 	// The newest headset panel, one array layer per eye, in TRANSFER_SRC_OPTIMAL once ready.
 	// The frame thread holds the mutex while it records and submits its copy out of the panel,
@@ -230,6 +235,8 @@ private:
 	bool          m_bounds_stale = true;
 
 	Panel                        m_panel;
+	Common::Mutex                m_vblank_mutex;
+	std::function<void()>        m_vblank_handler;
 	std::unique_ptr<Input>       m_input;
 	std::unique_ptr<FrameThread> m_frame_thread;
 };

@@ -14,6 +14,9 @@
 
 namespace Libs::Graphics::Xr {
 
+// About 90 Hz, the PSVR2's slower refresh.
+constexpr uint32_t IDLE_PERIOD_US = 11111;
+
 // The panel holds gamma-encoded 8-bit UNORM pixels. Copying their bits into the matching sRGB
 // format makes the runtime decode them correctly, without a shader pass.
 static vk::Format SrgbFormat(vk::Format format) {
@@ -72,8 +75,11 @@ void FrameThread::Run(const std::stop_token& token) {
 	while (!token.stop_requested()) {
 		m_runtime.PollEvents();
 		if (!m_runtime.IsSessionRunning() || !RunFrame()) {
-			// Nothing paces us until the session runs.
-			Common::Thread::SleepMicro(10000);
+			// Nothing paces us until the session runs, but the guest's headset clock keeps going.
+			Common::Thread::SleepMicro(IDLE_PERIOD_US);
+			if (!m_runtime.IsSessionRunning()) {
+				m_runtime.Vblank();
+			}
 		}
 	}
 
@@ -97,6 +103,8 @@ bool FrameThread::RunFrame() {
 		return false;
 	}
 	m_runtime.OnFrameWaited(frame_state);
+	// Flips the guest completes here reach this frame's panel.
+	m_runtime.Vblank();
 	if (auto* input = m_runtime.GetInput(); input != nullptr) {
 		input->Sync(frame_state.predictedDisplayTime, m_runtime.GetWorldSpace());
 	}

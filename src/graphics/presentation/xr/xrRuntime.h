@@ -6,6 +6,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 
 // Host OpenXR runtime that backs the PSVR2 headset in VR mode openxr. The interface is free of
 // OpenXR types so that HLE code and builds without the OpenXR loader can use it.
@@ -185,6 +186,11 @@ void SetControllerVibration(Hand hand, float amplitude);
 void RecordPanelCopy(vk::CommandBuffer command, vk::Image source, vk::Format format,
                      vk::Extent2D extent, const PanelView& view);
 void PanelCopySubmitted();
+
+// Clock of the guest's HMD2 video-out bus. The frame thread calls the handler once per headset
+// refresh, right after xrWaitFrame, and about 90 times a second while the session is not running.
+// Replacing the handler waits until a call in progress has returned.
+void SetVblankHandler(std::function<void()> handler);
 
 } // namespace Libs::Graphics::Xr
 

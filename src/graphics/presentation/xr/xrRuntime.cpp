@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstring>
 #include <fmt/format.h>
+#include <utility>
 #include <vector>
 
 namespace Libs::Graphics::Xr {
@@ -512,6 +513,18 @@ void Runtime::PanelCopySubmitted() {
 	m_panel.ready = m_panel.image.image != nullptr;
 }
 
+void Runtime::SetVblankHandler(std::function<void()> handler) {
+	Common::LockGuard lock(m_vblank_mutex);
+	m_vblank_handler = std::move(handler);
+}
+
+void Runtime::Vblank() {
+	Common::LockGuard lock(m_vblank_mutex);
+	if (m_vblank_handler) {
+		m_vblank_handler();
+	}
+}
+
 void Runtime::HandleSessionStateChange(const XrEventDataSessionStateChanged& event) {
 	if (event.session != m_session) {
 		return;
@@ -757,6 +770,12 @@ void PanelCopySubmitted() {
 	g_runtime->PanelCopySubmitted();
 }
 
+void SetVblankHandler(std::function<void()> handler) {
+	if (g_runtime != nullptr) {
+		g_runtime->SetVblankHandler(std::move(handler));
+	}
+}
+
 } // namespace Libs::Graphics::Xr
 
 #else // KYTY_OPENXR
@@ -880,6 +899,8 @@ void RecordPanelCopy(vk::CommandBuffer /*command*/, vk::Image /*source*/, vk::Fo
 }
 
 void PanelCopySubmitted() {}
+
+void SetVblankHandler(std::function<void()> /*handler*/) {}
 
 } // namespace Libs::Graphics::Xr
 

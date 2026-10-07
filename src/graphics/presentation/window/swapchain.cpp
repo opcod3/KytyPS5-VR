@@ -454,6 +454,9 @@ struct Presenter::Impl {
 	Common::Mutex         present_mutex;
 	std::array<Layer, 2>  layers {};
 	std::atomic<uint64_t> presented_overlay_revision {0};
+	// Guards the headset layer. The OpenXR frame thread presents headset flips, and must not
+	// wait for the main window's vsync under present_mutex.
+	Common::Mutex hmd_present_mutex;
 	// Created on the first headset flip, after its window is shown.
 	std::unique_ptr<Swapchain> hmd_swapchain;
 	Layer                      hmd_layer {};
@@ -1174,25 +1177,32 @@ void Presenter::Present(Frame& frame) {
 }
 
 void Presenter::Present(std::span<const Layer> layers) {
-	Common::LockGuard lock(m_impl->present_mutex);
-	bool              present_main = false;
-	bool              present_hmd  = false;
-	for (const auto& layer: layers) {
-		const bool hmd = layer.bus == HMD_BUS;
-		EXIT_IF(!hmd && (layer.bus < 0 || layer.bus >= static_cast<int>(m_impl->layers.size())));
-		m_impl->frames.ValidateForPresent(layer.frame);
-		auto& previous = hmd ? m_impl->hmd_layer : m_impl->layers[layer.bus];
-		if (previous.frame != nullptr) {
-			m_impl->frames.Release(previous.frame);
+	// Replaces the layers of one output; false when it has none in this flip.
+	auto update = [this, layers](bool hmd) {
+		bool updated = false;
+		for (const auto& layer: layers) {
+			if ((layer.bus == HMD_BUS) != hmd) {
+				continue;
+			}
+			EXIT_IF(!hmd && (layer.bus < 0 || layer.bus >= static_cast<int>(m_impl->layers.size())));
+			m_impl->frames.ValidateForPresent(layer.frame);
+			auto& previous = hmd ? m_impl->hmd_layer : m_impl->layers[layer.bus];
+			if (previous.frame != nullptr) {
+				m_impl->frames.Release(previous.frame);
+			}
+			previous = layer;
+			updated  = true;
 		}
-		previous = layer;
-		present_hmd |= hmd;
-		present_main |= !hmd;
+		return updated;
+	};
+	{
+		Common::LockGuard lock(m_impl->present_mutex);
+		if (update(false)) {
+			m_impl->Present();
+		}
 	}
-	if (present_main) {
-		m_impl->Present();
-	}
-	if (present_hmd) {
+	Common::LockGuard lock(m_impl->hmd_present_mutex);
+	if (update(true)) {
 		m_impl->PresentHmd();
 	}
 }
@@ -1201,7 +1211,7 @@ void Presenter::ClearLayer(int bus) {
 	if (bus != HMD_BUS && static_cast<size_t>(bus) >= m_impl->layers.size()) {
 		return;
 	}
-	Common::LockGuard lock(m_impl->present_mutex);
+	Common::LockGuard lock(bus == HMD_BUS ? m_impl->hmd_present_mutex : m_impl->present_mutex);
 	auto&             layer = bus == HMD_BUS ? m_impl->hmd_layer : m_impl->layers[bus];
 	if (layer.frame != nullptr) {
 		m_impl->frames.Release(layer.frame);
