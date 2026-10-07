@@ -1443,6 +1443,14 @@ bool FlipQueue::Flip(uint32_t micros, bool headset) {
 	}
 	if (due) {
 		m_presenter.Present(std::span(layers.data(), count));
+		// Marks a presented guest flip group so Tracy shows the real guest frame cadence, which is
+		// otherwise hidden behind the host present thread's fixed-rate mirror refresh. Tracy's
+		// FrameMark dereferences the profiler before its own guard, and with TRACY_DELAYED_INIT the
+		// profiler is null until a capture connects, so gate it exactly like the KYTY_PROFILER_*
+		// macros do (they pass ProfilerAvailable() to the zone); otherwise this faults on startup.
+		if (tracy::ProfilerAvailable()) {
+			FrameMark;
+		}
 	}
 
 	m_mutex.Lock();
