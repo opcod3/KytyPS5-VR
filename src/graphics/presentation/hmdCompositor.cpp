@@ -9,7 +9,6 @@ namespace Libs::Graphics {
 
 struct HmdLayerConstants {
 	std::array<float, 4> region;
-	uint32_t             fsr;
 };
 
 HmdCompositor::~HmdCompositor() {
@@ -39,16 +38,12 @@ void HmdCompositor::CreateLayout() {
 	sampler.addressModeW = vk::SamplerAddressMode::eClampToEdge;
 	RequireVulkanSuccess(device.createSampler(&sampler, nullptr, &m_sampler),
 	                     "create headset compositor sampler");
-	// Source, then the horizontal and vertical FSR tables.
-	std::array<vk::DescriptorSetLayoutBinding, 3> bindings {};
-	for (uint32_t i = 0; i < bindings.size(); i++) {
-		bindings[i] = {i, vk::DescriptorType::eCombinedImageSampler, 1,
-		               vk::ShaderStageFlagBits::eFragment};
-	}
-	vk::DescriptorSetLayoutCreateInfo descriptors {};
+	const vk::DescriptorSetLayoutBinding binding {0, vk::DescriptorType::eCombinedImageSampler, 1,
+	                                              vk::ShaderStageFlagBits::eFragment};
+	vk::DescriptorSetLayoutCreateInfo    descriptors {};
 	descriptors.flags        = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR;
-	descriptors.bindingCount = static_cast<uint32_t>(bindings.size());
-	descriptors.pBindings    = bindings.data();
+	descriptors.bindingCount = 1;
+	descriptors.pBindings    = &binding;
 	RequireVulkanSuccess(device.createDescriptorSetLayout(&descriptors, nullptr, &m_descriptors),
 	                     "create headset compositor descriptor layout");
 	const vk::PushConstantRange  constants {vk::ShaderStageFlagBits::eFragment, 0,
@@ -185,25 +180,16 @@ void HmdCompositor::Record(vk::CommandBuffer command, vk::ImageView target, vk::
 	rendering.pColorAttachments    = &attachment;
 	command.beginRendering(&rendering);
 	for (const auto& draw: draws) {
-		std::array<vk::DescriptorImageInfo, 3> images {};
-		images[0] = {m_sampler, draw.source, vk::ImageLayout::eShaderReadOnlyOptimal};
-		const bool fsr = draw.fsr_lut[0] != nullptr;
-		for (uint32_t i = 0; i < 2; i++) {
-			// Unused tables still need a valid descriptor; the source stands in for them.
-			images[i + 1] = {m_sampler, fsr ? draw.fsr_lut[i] : draw.source,
-			                 vk::ImageLayout::eShaderReadOnlyOptimal};
-		}
-		std::array<vk::WriteDescriptorSet, 3> writes {};
-		for (uint32_t i = 0; i < writes.size(); i++) {
-			writes[i].dstBinding      = i;
-			writes[i].descriptorCount = 1;
-			writes[i].descriptorType  = vk::DescriptorType::eCombinedImageSampler;
-			writes[i].pImageInfo      = &images[i];
-		}
+		const vk::DescriptorImageInfo image {m_sampler, draw.source,
+		                                     vk::ImageLayout::eShaderReadOnlyOptimal};
+		vk::WriteDescriptorSet        write {};
+		write.dstBinding      = 0;
+		write.descriptorCount = 1;
+		write.descriptorType  = vk::DescriptorType::eCombinedImageSampler;
+		write.pImageInfo      = &image;
 		command.bindPipeline(vk::PipelineBindPoint::eGraphics, FindPipeline(draw.blend, format));
-		command.pushDescriptorSetKHR(vk::PipelineBindPoint::eGraphics, m_layout, 0,
-		                             static_cast<uint32_t>(writes.size()), writes.data());
-		const HmdLayerConstants constants {draw.region, fsr ? 1u : 0u};
+		command.pushDescriptorSetKHR(vk::PipelineBindPoint::eGraphics, m_layout, 0, 1, &write);
+		const HmdLayerConstants constants {draw.region};
 		command.pushConstants(m_layout, vk::ShaderStageFlagBits::eFragment, 0, sizeof(constants),
 		                      &constants);
 		const vk::Viewport viewport {static_cast<float>(draw.target.offset.x),

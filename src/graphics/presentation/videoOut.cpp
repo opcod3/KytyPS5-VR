@@ -219,9 +219,6 @@ struct Hmd2Source {
 	uint32_t layer_type = 0;
 	// Left and right eye; a 2D source uses one texture for both.
 	std::array<Graphics::ShaderTextureResource, 2> texture {};
-	// Per eye, the horizontal and vertical FSR resolve tables.
-	std::array<std::array<Graphics::ShaderTextureResource, 2>, 2> fsr_lut {};
-	bool                                                          fsr = false;
 };
 
 struct VideoOutBuffer {
@@ -714,9 +711,6 @@ static Graphics::Presenter::HmdComposition Hmd2Composition(const VideoOutBuffer&
 			const auto& viewport = setting.viewport[eye];
 			auto&       out      = layer.eyes[eye];
 			out.texture          = source.texture[eye];
-			out.fsr_lut[0]       = source.fsr_lut[eye][0];
-			out.fsr_lut[1]       = source.fsr_lut[eye][1];
-			out.fsr              = source.fsr;
 			out.x                = viewport.x;
 			out.y                = viewport.y;
 			out.width            = viewport.width;
@@ -1552,7 +1546,10 @@ KYTY_SYSV_ABI int VideoOutAddOutputModeEvent(LibKernel::EventQueue::KernelEqueue
 }
 
 // A headset buffer lists the reprojection sources composited into that display buffer. The
-// guest list is copied, since it only has to outlive the registration call.
+// guest list is copied, since it only has to outlive the registration call. A source marked as
+// FSR space carries tables that undo the rasterizer's foveation warp, but draws are rasterized
+// without that warp (PA_SC_FSR_ENABLE is ignored), so every source is linear and the tables go
+// unused.
 static std::vector<Hmd2Source> Hmd2ParseSources(const void* data) {
 	const auto* buffer = static_cast<const Hmd2ReprojectionBuffer*>(data);
 	if (buffer == nullptr || buffer->src == nullptr || buffer->src_count == 0 ||
@@ -1572,11 +1569,6 @@ static std::vector<Hmd2Source> Hmd2ParseSources(const void* data) {
 				const auto& src3d = guest.data.src3d;
 				copy(source.texture[0], src3d.src_l);
 				copy(source.texture[1], src3d.src_r);
-				copy(source.fsr_lut[0][0], src3d.fsr_lut_l.horizontal);
-				copy(source.fsr_lut[0][1], src3d.fsr_lut_l.vertical);
-				copy(source.fsr_lut[1][0], src3d.fsr_lut_r.horizontal);
-				copy(source.fsr_lut[1][1], src3d.fsr_lut_r.vertical);
-				source.fsr = src3d.enable_fsr;
 				break;
 			}
 			case Hmd2::LAYER_TYPE_UI2D:
@@ -1584,10 +1576,7 @@ static std::vector<Hmd2Source> Hmd2ParseSources(const void* data) {
 				const auto& src2d = guest.data.src2d;
 				for (uint32_t eye = 0; eye < 2; eye++) {
 					copy(source.texture[eye], src2d.src);
-					copy(source.fsr_lut[eye][0], src2d.fsr_lut.horizontal);
-					copy(source.fsr_lut[eye][1], src2d.fsr_lut.vertical);
 				}
-				source.fsr = src2d.enable_fsr;
 				break;
 			}
 			default: EXIT("unsupported headset layer type 0x%x\n", guest.layer_type);

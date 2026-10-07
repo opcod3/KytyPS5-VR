@@ -30,16 +30,13 @@ public:
 	// How a headset layer lands on the panel, applied to what is already there.
 	enum class HmdBlend : uint8_t { Opaque, Alpha, PremultipliedAlpha, Add };
 
-	// One eye of a headset layer: a region of a guest texture, optionally rendered in FSR space
-	// and resolved through its horizontal and vertical lookup tables.
+	// One eye of a headset layer: a region of a guest texture.
 	struct HmdEye {
 		ShaderTextureResource texture;
-		ShaderTextureResource fsr_lut[2];
 		uint32_t              x      = 0;
 		uint32_t              y      = 0;
 		uint32_t              width  = 0;
 		uint32_t              height = 0;
-		bool                  fsr    = false;
 	};
 	struct HmdLayer {
 		std::array<HmdEye, 2> eyes;

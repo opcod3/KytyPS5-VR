@@ -17,9 +17,7 @@ class HmdCompositor final {
 public:
 	struct Draw {
 		vk::ImageView source = nullptr;
-		// Horizontal and vertical FSR resolve tables; null when the source is not in FSR space.
-		std::array<vk::ImageView, 2> fsr_lut {};
-		vk::Rect2D                   target;
+		vk::Rect2D    target;
 		// Normalized offset and size of the drawn region in the source.
 		std::array<float, 4> region {};
 		Presenter::HmdBlend  blend = Presenter::HmdBlend::Opaque;

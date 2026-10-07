@@ -371,7 +371,7 @@ struct Presenter::Impl {
 		cache.UpdateImage(image_id);
 		return image;
 	}
-	// Headset layer textures and FSR tables are single-level color textures, resolved the
+	// Headset layer textures are single-level color textures, resolved the
 	// same way a shader samples them so they alias the guest's own images.
 	vk::ImageView ResolveHmdTexture(const ShaderTextureResource& texture,
 	                                vk::CommandBuffer            command) {
@@ -1085,10 +1085,6 @@ Presenter::Frame& Presenter::PrepareHmdFrame(CommandBuffer&        buffer,
 			const auto&          source = layer.eyes[eye];
 			HmdCompositor::Draw draw {};
 			draw.source = m_impl->ResolveHmdTexture(source.texture, command);
-			if (source.fsr) {
-				draw.fsr_lut[0] = m_impl->ResolveHmdTexture(source.fsr_lut[0], command);
-				draw.fsr_lut[1] = m_impl->ResolveHmdTexture(source.fsr_lut[1], command);
-			}
 			draw.target = {{static_cast<int32_t>(eye * eye_width), 0},
 			               {eye_width, composition.height}};
 			const auto width  = static_cast<float>(source.texture.Width5() + 1u);
