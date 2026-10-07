@@ -196,7 +196,7 @@ bool FoldCompositeExtract(Inst& inst, ValueOpcode construct, size_t components) 
 }
 
 void FoldInstruction(Block& block, Block::iterator instruction,
-                      std::unordered_set<Inst*>& lowered_ancillary) {
+                      std::unordered_set<Inst*>& lowered_ancillary, uint32_t stereo_eye = 0) {
 	auto& inst = *instruction;
 	switch (inst.GetOpcode()) {
 		case ValueOpcode::StoreBufferU32: {
@@ -271,10 +271,10 @@ void FoldInstruction(Block& block, Block::iterator instruction,
 			if (source != nullptr && source->GetOpcode() == ValueOpcode::GetBuiltin &&
 			    source->Arg(0) == Value(static_cast<uint32_t>(StageInputKind::PackedAncillary)) &&
 			    IsImmediate(offset, Type::U32) && IsImmediate(count, Type::U32) && count.U32() != 0u) {
-				// Stereo (PSVR2) shaders select the eye with bit 7. Stereo is not emulated, so only
-				// the left eye is rasterized.
+				// Stereo (PSVR2) shaders select the eye with bit 7. Each eye is rasterized by its
+				// own shader variant, so the bit is constant.
 				if (offset.U32() == 7u && count.U32() == 1u) {
-					Replace(inst, Value(0u));
+					Replace(inst, Value(stereo_eye));
 					return;
 				}
 				constexpr struct {
@@ -810,13 +810,13 @@ private:
 
 } // namespace
 
-void ConstantPropagationPass(const BlockList& blocks, uint32_t wave_size) {
+void ConstantPropagationPass(const BlockList& blocks, uint32_t wave_size, uint32_t stereo_eye) {
 	std::unordered_set<Inst*> lowered_ancillary;
 	LaneMaskProjection mask_projection(lowered_ancillary);
 	for (auto* block: blocks) {
 		for (auto inst = block->begin(); inst != block->end(); ++inst) {
 			if (wave_size == 32u) mask_projection.Fold(*inst);
-			FoldInstruction(*block, inst, lowered_ancillary);
+			FoldInstruction(*block, inst, lowered_ancillary, stereo_eye);
 		}
 	}
 	// Normalize retained PHI/select values only after every supported field read has

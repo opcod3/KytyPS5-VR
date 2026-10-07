@@ -4,6 +4,8 @@
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
 
-void ConstantPropagationPass(const BlockList& blocks, uint32_t wave_size = 64);
+// stereo_eye is the eye a stereo expansion variant rasterizes, as read from the ancillary input.
+void ConstantPropagationPass(const BlockList& blocks, uint32_t wave_size = 64,
+                             uint32_t stereo_eye = 0);
 
 } // namespace Libs::Graphics::ShaderRecompiler::IR

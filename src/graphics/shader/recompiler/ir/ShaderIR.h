@@ -233,6 +233,8 @@ struct PositionExportComponent {
 	bool     point_size     = false;
 	bool     layer          = false;
 	bool     viewport       = false;
+	// MISC.w carries the right-eye clip-space X of a stereo expansion primitive.
+	bool     stereo_x       = false;
 };
 
 inline PositionExportComponent DecodePositionExportComponent(uint32_t control,
@@ -262,6 +264,7 @@ inline PositionExportComponent DecodePositionExportComponent(uint32_t control,
 		result.point_size = component == 0 && (control & (1u << 16u)) != 0;
 		result.layer      = component == 2 && (control & (1u << 18u)) != 0;
 		result.viewport   = component == 2 && (control & (1u << 19u)) != 0;
+		result.stereo_x   = component == 3;
 		return result;
 	}
 

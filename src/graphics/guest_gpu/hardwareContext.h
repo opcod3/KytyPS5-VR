@@ -621,6 +621,23 @@ struct GeControl {
 	uint16_t vertex_group_size    = 0;
 };
 
+// GE_STEREO_CNTL: stereo expansion rasterizes every primitive a second time for the right eye.
+struct GeStereoControl {
+	uint8_t render_target_slice = 0;
+	uint8_t viewport            = 0;
+	bool    enable              = false;
+};
+
+// PA_STEREO_CNTL and PA_STATE_STEREO_X: how the right-eye primitive is placed.
+struct StereoControl {
+	static constexpr uint8_t MODE_SHADER_X = 0;
+
+	uint8_t mode               = MODE_SHADER_X;
+	uint8_t rt_slice_offset    = 0;
+	uint8_t viewport_id_offset = 0;
+	float   x_offset           = 0.0f;
+};
+
 struct GeUserVgprEn {
 	bool vgpr1 = false;
 	bool vgpr2 = false;
@@ -818,6 +835,13 @@ public:
 	void SetBlendColor(const BlendColor& color) { m_blend_color = color; }
 	[[nodiscard]] const ClipControl& GetClipControl() const { return m_clip_control; }
 	void SetClipControl(const ClipControl& control) { m_clip_control = control; }
+	[[nodiscard]] const StereoControl& GetStereoControl() const { return m_stereo_control; }
+	void SetStereoControl(uint8_t mode, uint8_t rt_slice_offset, uint8_t viewport_id_offset) {
+		m_stereo_control.mode               = mode;
+		m_stereo_control.rt_slice_offset    = rt_slice_offset;
+		m_stereo_control.viewport_id_offset = viewport_id_offset;
+	}
+	void SetStereoXOffset(float offset) { m_stereo_control.x_offset = offset; }
 	[[nodiscard]] const RenderControl& GetRenderControl() const { return m_render_control; }
 	void SetRenderControl(const RenderControl& control) { m_render_control = control; }
 	[[nodiscard]] const DepthRenderOverride& GetDepthRenderOverride() const {
@@ -913,6 +937,7 @@ private:
 	uint32_t        m_render_target_mask = 0;
 	ScreenViewport  m_screen_viewport;
 	ClipControl     m_clip_control;
+	StereoControl   m_stereo_control;
 	ColorControl    m_color_control;
 	ScanModeControl m_scan_mode_control;
 
@@ -974,17 +999,23 @@ public:
 	void SetGdsOaCntl(uint32_t value) { m_gds_oa.cntl = value; }
 	void SetGdsOaCounter(uint32_t value) { m_gds_oa.counters[m_gds_oa.GetIndex()].counter = value; }
 	void SetGdsOaAddress(uint32_t value) { m_gds_oa.counters[m_gds_oa.GetIndex()].address = value; }
-	void SetFsrControlPoint(uint32_t axis, uint32_t index, uint32_t value) {
-		m_fsr_view.control_points[axis][index] = value;
+	[[nodiscard]] const GeStereoControl& GetGeStereoControl() const { return m_ge_stereo_cntl; }
+	void SetGeStereoControl(const GeStereoControl& control) { m_ge_stereo_cntl = control; }
+	// FSR views are indexed by eye: 0 is the left eye, 1 the right.
+	void SetFsrControlPoint(uint32_t eye, uint32_t axis, uint32_t index, uint32_t value) {
+		m_fsr_views[eye].control_points[axis][index] = value;
 	}
-	void SetFsrAlpha(uint32_t axis, uint32_t index, uint32_t value) {
-		m_fsr_view.alphas[axis][index] = value;
+	void SetFsrAlpha(uint32_t eye, uint32_t axis, uint32_t index, uint32_t value) {
+		m_fsr_views[eye].alphas[axis][index] = value;
 	}
-	void SetFsrWindow(uint32_t index, uint32_t value) { m_fsr_view.window[index] = value; }
-	[[nodiscard]] const FsrView& GetFsrView() const { return m_fsr_view; }
+	void SetFsrWindow(uint32_t eye, uint32_t index, uint32_t value) {
+		m_fsr_views[eye].window[index] = value;
+	}
+	[[nodiscard]] const FsrView& GetFsrView(uint32_t eye) const { return m_fsr_views[eye]; }
 
 private:
-	FsrView m_fsr_view;
+	FsrView                 m_fsr_views[2];
+	GeStereoControl         m_ge_stereo_cntl;
 	Prospero::PrimitiveType m_prim_type               = Prospero::PrimitiveType::kNone;
 	uint32_t                m_index_offset            = 0;
 	uint32_t                m_object_id               = 0;

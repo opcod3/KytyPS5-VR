@@ -789,7 +789,11 @@ TranslateResult TranslateProgram(const Decoder::Program& decoded, const CompileO
 	     GetDumpLabel(options), StageName(options.stage), options.shader_hash,
 	     static_cast<uint64_t>(ir.blocks.size()), phase_ms());
 	IR::RewriteToSsa(ir.blocks);
-	IR::ConstantPropagationPass(ir.blocks, ir.wave_size);
+	const uint32_t stereo_eye =
+	    options.stage == ShaderType::Pixel && options.input_info.pixel != nullptr
+	        ? options.input_info.pixel->stereo_eye
+	        : 0u;
+	IR::ConstantPropagationPass(ir.blocks, ir.wave_size, stereo_eye);
 	IR::ResolveControlFlowIdentities(ir);
 	IR::RemoveIdentities(ir.blocks);
 	IR::EliminateDeadCode(ir.blocks);
@@ -797,7 +801,7 @@ TranslateResult TranslateProgram(const Decoder::Program& decoded, const CompileO
 	if (read_lane_stats.rewritten_reads != 0) {
 		LOGF("%s read-lane elimination: reads=%" PRIu32 "\n", GetDumpLabel(options),
 		     read_lane_stats.rewritten_reads);
-		IR::ConstantPropagationPass(ir.blocks, ir.wave_size);
+		IR::ConstantPropagationPass(ir.blocks, ir.wave_size, stereo_eye);
 		IR::ResolveControlFlowIdentities(ir);
 		IR::RemoveIdentities(ir.blocks);
 		IR::EliminateDeadCode(ir.blocks);

@@ -138,6 +138,8 @@ struct ShaderVertexInputInfo {
 	uint32_t                wave_size           = 64;
 	uint32_t                scratch_size_dwords = 0;
 	uint32_t                pa_cl_vs_out_cntl    = 0;
+	// Stereo expansion eye: the right eye (1) takes its clip-space X from the MISC vector W.
+	uint32_t                stereo_eye           = 0;
 	ShaderClipSpaceTransform clip_space;
 	ShaderMeshInputInfo      mesh;
 	ShaderTessellationInputInfo tess;
@@ -192,6 +194,8 @@ struct ShaderPixelInputInfo {
 	ShaderAlphaBlendSource                         alpha_blend_source = ShaderAlphaBlendSource::None;
 	bool                                           ps_early_z                   = false;
 	bool                                           ps_execute_on_noop           = false;
+	// Stereo expansion eye reported through the packed ancillary input.
+	uint32_t                                       stereo_eye                   = 0;
 	ShaderStageRuntime                             stage;
 
 	bool HasPositionInput() const { return ps_pos_x || ps_pos_y || ps_pos_z || ps_pos_w; }

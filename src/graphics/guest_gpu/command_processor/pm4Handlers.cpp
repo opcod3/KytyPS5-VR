@@ -3121,23 +3121,14 @@ void GraphicsInitJmpTablesCxIndirect() {
 		HwCtxIgnoreObjprimIdControl(value);
 	};
 
-	// Stereo rendering control (used by PSVR2 titles). No stereo pipeline is implemented, so
-	// accept and ignore these registers rather than aborting on an unknown offset.
+	// Stereo rendering control (used by PSVR2 titles): how the right-eye primitive is placed.
 	g_hw_ctx_indirect_func[Pm4::PA_STEREO_CNTL] = [](KYTY_HW_CTX_INDIRECT_ARGS) {
-		static std::atomic<uint32_t> log_count {0};
-		if (log_count.fetch_add(1, std::memory_order_relaxed) < 4) {
-			LOGF("\t temporary: ignoring indirect CX PA_STEREO_CNTL at 0x%" PRIx32 " = 0x%08" PRIx32
-			     "\n",
-			     cmd_offset, value);
-		}
+		cp.GetCtx().SetStereoControl(static_cast<uint8_t>((value >> 1u) & 0x3u),
+		                             static_cast<uint8_t>((value >> 8u) & 0xfu),
+		                             static_cast<uint8_t>((value >> 19u) & 0xfu));
 	};
 	g_hw_ctx_indirect_func[Pm4::PA_STATE_STEREO_X] = [](KYTY_HW_CTX_INDIRECT_ARGS) {
-		static std::atomic<uint32_t> log_count {0};
-		if (log_count.fetch_add(1, std::memory_order_relaxed) < 4) {
-			LOGF("\t temporary: ignoring indirect CX PA_STATE_STEREO_X at 0x%" PRIx32 " = 0x%08" PRIx32
-			     "\n",
-			     cmd_offset, value);
-		}
+		cp.GetCtx().SetStereoXOffset(std::bit_cast<float>(value));
 	};
 
 	for (auto cmd_offset = Pm4::PA_SC_CLIPRECT_RULE; cmd_offset < Pm4::PA_SC_CLIPRECT_0_TL + 8u;
@@ -3851,40 +3842,46 @@ void GraphicsInitJmpTablesUcIndirect() {
 	}
 	for (uint32_t i = 0; i < 4; ++i) {
 		g_hw_uc_indirect_func[Pm4::FSR_CONTROL_POINTS_LEFT_X + i] = [](KYTY_HW_UC_INDIRECT_ARGS) {
-			cp.GetUcfg().SetFsrControlPoint(0, cmd_offset - Pm4::FSR_CONTROL_POINTS_LEFT_X, value);
+			cp.GetUcfg().SetFsrControlPoint(0, 0, cmd_offset - Pm4::FSR_CONTROL_POINTS_LEFT_X,
+			                                value);
 		};
 		g_hw_uc_indirect_func[Pm4::FSR_CONTROL_POINTS_LEFT_Y + i] = [](KYTY_HW_UC_INDIRECT_ARGS) {
-			cp.GetUcfg().SetFsrControlPoint(1, cmd_offset - Pm4::FSR_CONTROL_POINTS_LEFT_Y, value);
+			cp.GetUcfg().SetFsrControlPoint(0, 1, cmd_offset - Pm4::FSR_CONTROL_POINTS_LEFT_Y,
+			                                value);
 		};
 	}
 	for (uint32_t i = 0; i < 2; ++i) {
 		g_hw_uc_indirect_func[Pm4::FSR_ALPHA_LEFT_X + i] = [](KYTY_HW_UC_INDIRECT_ARGS) {
-			cp.GetUcfg().SetFsrAlpha(0, cmd_offset - Pm4::FSR_ALPHA_LEFT_X, value);
+			cp.GetUcfg().SetFsrAlpha(0, 0, cmd_offset - Pm4::FSR_ALPHA_LEFT_X, value);
 		};
 		g_hw_uc_indirect_func[Pm4::FSR_ALPHA_LEFT_Y + i] = [](KYTY_HW_UC_INDIRECT_ARGS) {
-			cp.GetUcfg().SetFsrAlpha(1, cmd_offset - Pm4::FSR_ALPHA_LEFT_Y, value);
+			cp.GetUcfg().SetFsrAlpha(0, 1, cmd_offset - Pm4::FSR_ALPHA_LEFT_Y, value);
 		};
 		g_hw_uc_indirect_func[Pm4::FSR_WINDOW_LEFT + i] = [](KYTY_HW_UC_INDIRECT_ARGS) {
-			cp.GetUcfg().SetFsrWindow(cmd_offset - Pm4::FSR_WINDOW_LEFT, value);
+			cp.GetUcfg().SetFsrWindow(0, cmd_offset - Pm4::FSR_WINDOW_LEFT, value);
 		};
 	}
-	// Right-eye foveated-rendering registers, programmed by stereo (PSVR2) titles. Foveation is
-	// not applied per-eye, so accept and ignore these so VR submission does not abort.
-	auto ignore_fsr_right = [](KYTY_HW_UC_INDIRECT_ARGS) {
-		static std::atomic<uint32_t> log_count {0};
-		if (log_count.fetch_add(1, std::memory_order_relaxed) < 8) {
-			LOGF("\t temporary: ignoring right-eye FSR reg 0x%" PRIx32 " = 0x%08" PRIx32 "\n",
-			     cmd_offset, value);
-		}
-	};
+	// Right-eye foveated-rendering registers, programmed by stereo (PSVR2) titles.
 	for (uint32_t i = 0; i < 4; ++i) {
-		g_hw_uc_indirect_func[Pm4::FSR_CONTROL_POINTS_RIGHT_X + i] = ignore_fsr_right;
-		g_hw_uc_indirect_func[Pm4::FSR_CONTROL_POINTS_RIGHT_Y + i] = ignore_fsr_right;
+		g_hw_uc_indirect_func[Pm4::FSR_CONTROL_POINTS_RIGHT_X + i] = [](KYTY_HW_UC_INDIRECT_ARGS) {
+			cp.GetUcfg().SetFsrControlPoint(1, 0, cmd_offset - Pm4::FSR_CONTROL_POINTS_RIGHT_X,
+			                                value);
+		};
+		g_hw_uc_indirect_func[Pm4::FSR_CONTROL_POINTS_RIGHT_Y + i] = [](KYTY_HW_UC_INDIRECT_ARGS) {
+			cp.GetUcfg().SetFsrControlPoint(1, 1, cmd_offset - Pm4::FSR_CONTROL_POINTS_RIGHT_Y,
+			                                value);
+		};
 	}
 	for (uint32_t i = 0; i < 2; ++i) {
-		g_hw_uc_indirect_func[Pm4::FSR_ALPHA_RIGHT_X + i] = ignore_fsr_right;
-		g_hw_uc_indirect_func[Pm4::FSR_ALPHA_RIGHT_Y + i] = ignore_fsr_right;
-		g_hw_uc_indirect_func[Pm4::FSR_WINDOW_RIGHT + i]  = ignore_fsr_right;
+		g_hw_uc_indirect_func[Pm4::FSR_ALPHA_RIGHT_X + i] = [](KYTY_HW_UC_INDIRECT_ARGS) {
+			cp.GetUcfg().SetFsrAlpha(1, 0, cmd_offset - Pm4::FSR_ALPHA_RIGHT_X, value);
+		};
+		g_hw_uc_indirect_func[Pm4::FSR_ALPHA_RIGHT_Y + i] = [](KYTY_HW_UC_INDIRECT_ARGS) {
+			cp.GetUcfg().SetFsrAlpha(1, 1, cmd_offset - Pm4::FSR_ALPHA_RIGHT_Y, value);
+		};
+		g_hw_uc_indirect_func[Pm4::FSR_WINDOW_RIGHT + i] = [](KYTY_HW_UC_INDIRECT_ARGS) {
+			cp.GetUcfg().SetFsrWindow(1, cmd_offset - Pm4::FSR_WINDOW_RIGHT, value);
+		};
 	}
 
 	g_hw_uc_indirect_func[Pm4::GE_CNTL] = [](KYTY_HW_UC_INDIRECT_ARGS) {
@@ -3949,12 +3946,11 @@ void GraphicsInitJmpTablesUcIndirect() {
 	};
 
 	g_hw_uc_indirect_func[Pm4::GE_STEREO_CNTL] = [](KYTY_HW_UC_INDIRECT_ARGS) {
-		static std::atomic<uint32_t> log_count {0};
-		if (log_count.fetch_add(1) < 16) {
-			LOGF("warning: ignoring indirect uc reg GE_STEREO_CNTL at 0x%" PRIx32
-			     ", value = 0x%08" PRIx32 "\n",
-			     cmd_offset, value);
-		}
+		HW::GeStereoControl r;
+		r.render_target_slice = static_cast<uint8_t>(value & 0x7u);
+		r.viewport            = static_cast<uint8_t>((value >> 3u) & 0xfu);
+		r.enable              = (value & 0x100u) != 0;
+		cp.GetUcfg().SetGeStereoControl(r);
 	};
 }
 

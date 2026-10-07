@@ -312,9 +312,11 @@ static void LogDrawInputState(const CommandBuffer& buffer, const RenderColorInfo
 	}
 }
 
+// A right-eye stereo primitive uses the guest viewport slot advanced by viewport_offset.
 static void UpdateGraphicsDynamicState(const CommandBuffer& buffer, DynamicState& dynamic_state,
                                        const ShaderVertexInputInfo& vs_input_info,
-                                       const RenderDepthInfo& depth, const RenderState& rendering) {
+                                       const RenderDepthInfo& depth, const RenderState& rendering,
+                                       uint32_t viewport_offset) {
 	KYTY_PROFILER_FUNCTION();
 
 	const auto& ctx = buffer.GetRegisters();
@@ -329,8 +331,10 @@ static void UpdateGraphicsDynamicState(const CommandBuffer& buffer, DynamicState
 	std::array<vk::Viewport, viewport_slots> viewports {};
 	std::array<vk::Rect2D, viewport_slots>   scissors {};
 	const uint32_t viewport_count = indexed_viewports ? viewport_slots : 1;
+	EXIT_NOT_IMPLEMENTED(viewport_offset >= viewport_slots ||
+	                     (indexed_viewports && viewport_offset != 0));
 	for (uint32_t i = 0; i < viewport_count; i++) {
-		const auto& guest    = vp.viewports[i];
+		const auto& guest    = vp.viewports[i + viewport_offset];
 		auto&       viewport = viewports[i];
 		if (ctx.GetClipControl().clip_disable) {
 			const auto& limits = buffer.GetGraphics().GetPhysicalDeviceProperties().limits;
@@ -347,7 +351,8 @@ static void UpdateGraphicsDynamicState(const CommandBuffer& buffer, DynamicState
 		viewport.maxDepth = guest.zscale + guest.zoffset;
 
 		const auto final_scissor =
-		    calc_final_scissor(vp, ctx.GetScanModeControl(), framebuffer_extent, i);
+		    calc_final_scissor(vp, ctx.GetScanModeControl(), framebuffer_extent,
+		                       i + viewport_offset);
 		auto& scissor  = scissors[i];
 		scissor.offset = {final_scissor.left, final_scissor.top};
 		scissor.extent = {static_cast<uint32_t>(final_scissor.right - final_scissor.left),
@@ -446,6 +451,8 @@ struct DrawRenderState {
 	std::array<ShaderVertexInputInfo, 3> vertex_info;
 	ShaderPixelInputInfo  ps_input_info;
 	PipelineCache::GraphicsPrograms programs;
+	// 1 while rasterizing the right eye of a stereo expansion draw.
+	uint32_t              stereo_eye = 0;
 };
 
 struct DrawCallInfo {
@@ -887,7 +894,22 @@ static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw,
 	}
 	state.programs = pipeline_cache.GetGraphicsPrograms(
 	    vertex_shader_info, pixel_shader_info, shader_regs, ctx, buffer.GetUserConfig(),
-	    target_export_mapping, state.ps_active, state.vertex_info, state.ps_input_info);
+	    target_export_mapping, state.ps_active, state.vertex_info, state.ps_input_info,
+	    state.stereo_eye);
+}
+
+// Stereo expansion rasterizes every primitive again for the right eye, through that eye's
+// shader variants and the viewport selected by the PA_STEREO_CNTL offset.
+static bool StereoExpansionEnabled(const CommandBuffer& buffer) {
+	const auto& expansion = buffer.GetUserConfig().GetGeStereoControl();
+	if (!expansion.enable) {
+		return false;
+	}
+	const auto& stereo = buffer.GetRegisters().GetStereoControl();
+	EXIT_NOT_IMPLEMENTED(expansion.render_target_slice != 0 || expansion.viewport != 0 ||
+	                     stereo.mode != HW::StereoControl::MODE_SHADER_X ||
+	                     stereo.rt_slice_offset != 0);
+	return true;
 }
 
 bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCallInfo& draw,
@@ -1195,9 +1217,11 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		CommitIndexBuffer(vk_buffer, index_binding);
 	}
 
+	const uint32_t viewport_offset =
+	    state.stereo_eye * buffer.GetRegisters().GetStereoControl().viewport_id_offset;
 	auto& dynamic_state = m_context.GetCommandScheduler().GetDynamicState();
 	UpdateGraphicsDynamicState(buffer, dynamic_state, vertex_stages.back(), state.depth_info,
-	                           rendering);
+	                           rendering, viewport_offset);
 	dynamic_state.SetAttachmentFeedbackLoopAspects(feedback_aspects);
 	dynamic_state.Commit(m_context.GetGraphics(), vk_buffer);
 
@@ -1349,6 +1373,15 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 
 	ExecutePreparedDraw(submit_id, buffer, draw, state, topology, emit, index_source,
 	                    primitive_restart);
+	if (StereoExpansionEnabled(buffer)) {
+		ResetBindings();
+		state            = {};
+		state.stereo_eye = 1;
+		if (PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state)) {
+			ExecutePreparedDraw(submit_id, buffer, draw, state, topology, emit, index_source,
+			                    primitive_restart);
+		}
+	}
 	ResetBindings();
 }
 
@@ -1441,6 +1474,15 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 
 	DrawIndexBufferSource index_source {};
 	ExecutePreparedDraw(submit_id, buffer, draw, state, topology, emit, index_source, false);
+	if (StereoExpansionEnabled(buffer)) {
+		ResetBindings();
+		state            = {};
+		state.stereo_eye = 1;
+		if (PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state)) {
+			ExecutePreparedDraw(submit_id, buffer, draw, state, topology, emit, index_source,
+			                    false);
+		}
+	}
 	ResetBindings();
 }
 

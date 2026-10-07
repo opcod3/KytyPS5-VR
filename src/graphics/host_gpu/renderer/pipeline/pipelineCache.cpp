@@ -645,7 +645,8 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
     const HW::VertexShaderInfo& vertex_regs, const HW::PixelShaderInfo& pixel_regs,
     const HW::ShaderRegisters& sh, const HW::Context& context, const HW::UserConfig& user_config,
     std::span<const Prospero::ColorComponentMapping, 8> target_export_mapping, bool pixel_active,
-    std::array<ShaderVertexInputInfo, 3>& vertex_info, ShaderPixelInputInfo& pixel_info) {
+    std::array<ShaderVertexInputInfo, 3>& vertex_info, ShaderPixelInputInfo& pixel_info,
+    uint32_t stereo_eye) {
 	const bool tess_active = user_config.GetPrimType() == Prospero::PrimitiveType::kPatch;
 	std::array<ShaderParams, 3> vertex_params;
 	if (tess_active) {
@@ -717,8 +718,15 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 			}
 		}
 	}
+	if (stereo_eye != 0) {
+		// The right-eye primitive comes from the last vertex stage's MISC export.
+		EXIT_NOT_IMPLEMENTED(tess_active || mesh_active);
+		vertex_info[0].stereo_eye = stereo_eye;
+		pixel_info.stereo_eye     = stereo_eye;
+	}
 	if (context.GetClipControl().clip_disable) {
-		const auto& viewport = context.GetScreenViewport().viewports[0];
+		const auto  slot     = stereo_eye * context.GetStereoControl().viewport_id_offset;
+		const auto& viewport = context.GetScreenViewport().viewports[slot];
 		const auto& limits   = m_graphics.GetPhysicalDeviceProperties().limits;
 		auto&       clip     = vertex_info[tess_active ? 2u : 0u].clip_space;
 		clip.scale[0]        = viewport.xscale;

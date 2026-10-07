@@ -347,6 +347,9 @@ uint32_t ExportVector(ValueEmitContext& ctx, uint32_t data, const IR::ExportInfo
 	return vector;
 }
 
+uint32_t ConvertClipCoordinate(EmitterState& state, uint32_t coordinate, float scale,
+                               float offset, float half_extent);
+
 void EmitAuxPositionExport(ValueEmitContext& ctx, uint32_t data, const IR::ExportInfo& exp) {
 	auto& state = ctx.state;
 	for (uint32_t component = 0; component < 4; component++) {
@@ -355,6 +358,29 @@ void EmitAuxPositionExport(ValueEmitContext& ctx, uint32_t data, const IR::Expor
 		}
 		const auto output = IR::DecodePositionExportComponent(
 		    state.input_info.vertex->pa_cl_vs_out_cntl, exp.index, component);
+		if (output.stereo_x) {
+			// The right-eye variant replaces the position X; the position is exported first.
+			if (state.input_info.vertex->stereo_eye == 0) {
+				continue;
+			}
+			EXIT_NOT_IMPLEMENTED(state.program.stage == ShaderType::Mesh);
+			const auto raw = ExportRawComponent(ctx, data, component);
+			auto       x   = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpBitcast, TypeF32(state), x, raw);
+			const auto& transform = state.input_info.vertex->clip_space;
+			if (transform.enabled) {
+				x = ConvertClipCoordinate(state, x, transform.scale[0], transform.offset[0],
+				                          transform.half_extent[0]);
+			}
+			// gl_PerVertex member 0 is the position.
+			const auto pointer = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpAccessChain,
+			                          TypePointer(state, spv::StorageClassOutput, TypeF32(state)),
+			                          pointer, state.per_vertex_variable, ConstantU32(state, 0),
+			                          ConstantU32(state, 0));
+			state.builder.AddFunction(spv::OpStore, pointer, x);
+			continue;
+		}
 		if (output.layer || output.viewport) {
 			const auto raw = ExportRawComponent(ctx, data, component);
 			if (output.layer) {
