@@ -635,4 +635,22 @@ LIB_DEFINE(InitHmd2_1) {
 	LIB_FUNC("8GkaY2B7opM", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionGetStatus
 }
 
+namespace Hmd2Positional {
+
+LIB_VERSION("Hmd2ReprojectionPositional", 1, "Hmd2", 1, 1);
+
+// Newer than SDK 4.00, so the parameter's meaning is unknown; Horizon Call of the Mountain passes 2.
+// Whether positional reprojection happens is the host runtime's choice, so this only logs.
+static int32_t KYTY_SYSV_ABI Hmd2ReprojectionSetAllowPositionalReprojection(int32_t mode) {
+	PRINT_NAME();
+	LOGF("Hmd2: allow positional reprojection mode=%d\n", mode);
+	return OK;
+}
+
+LIB_DEFINE(InitHmd2ReprojectionPositional_1) {
+	LIB_FUNC("uv0Ae+jCeWY", Hmd2ReprojectionSetAllowPositionalReprojection); // sceHmd2ReprojectionSetAllowPositionalReprojection
+}
+
+} // namespace Hmd2Positional
+
 } // namespace Libs

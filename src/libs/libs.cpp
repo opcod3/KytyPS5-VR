@@ -88,6 +88,9 @@ LIB_DEFINE(InitFont_1);
 LIB_DEFINE(InitFontFt_1);
 LIB_DEFINE(InitAgcDriver_1);
 LIB_DEFINE(InitHmd2_1);
+namespace Hmd2Positional {
+LIB_DEFINE(InitHmd2ReprojectionPositional_1);
+} // namespace Hmd2Positional
 LIB_DEFINE(InitLibKernel_1);
 LIB_DEFINE(InitNet_1);
 LIB_DEFINE(InitPad_1);
@@ -128,6 +131,7 @@ void InitAll(Loader::SymbolDatabase* s) {
 	InitDeviceService_1(s);
 	InitUsbd_1(s);
 	InitHmd2_1(s);
+	Hmd2Positional::InitHmd2ReprojectionPositional_1(s);
 	InitLibKernel_1(s);
 	LibMouse::InitMouse_1(s);
 	LibKeyboard::InitKeyboard_1(s);

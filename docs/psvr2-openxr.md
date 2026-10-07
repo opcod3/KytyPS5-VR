@@ -658,6 +658,10 @@ Build: `KYTY_ENABLE_OPENXR` (default on) finds the system `OpenXR` CMake package
 - Monado's Qwerty HMD refreshes at 60 Hz, the same as the default `--vblank-frequency`. To see
   that the HMD2 bus follows the headset, run with `--vblank-frequency 30`: Horizon still flips the
   headset about 60 times a second.
+- Horizon imports `sceHmd2ReprojectionSetAllowPositionalReprojection` (NID `uv0Ae+jCeWY`,
+  library `Hmd2ReprojectionPositional`), which is newer than SDK 4.00. It takes one `int` (Horizon
+  passes 2, just before `QueryBufferSizeAlign`), and Horizon ignores the return value. It only logs;
+  the host runtime decides on positional reprojection.
 - Horizon queries the FOV right after `sceHmd2Open`. By then the session is normally focused and
   the eye views are cached; if not, the ER15 defaults are returned.
 
