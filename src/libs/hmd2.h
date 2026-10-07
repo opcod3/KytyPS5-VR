@@ -76,7 +76,8 @@ struct LayerSetting {
 	uint32_t                       src_id;
 	uint32_t                       blend_type;
 	std::array<TextureViewport, 2> viewport;
-	// The frustums a VR3D layer was rendered with.
+	// The frustums a VR3D layer was rendered with. Games swap tan_out and tan_in for the right
+	// eye, so here tan_out bounds the left side of either eye.
 	std::array<FieldOfView, 2> fov {DEFAULT_FIELD_OF_VIEW, DEFAULT_FIELD_OF_VIEW};
 	RenderPose                 pose {};
 };

@@ -63,6 +63,8 @@ struct HeadLocation {
 
 // How the headset shows one panel.
 struct PanelView {
+	// As SetParam carries them: games swap tan_out and tan_in for the right eye, so tan_out
+	// bounds the left side of either eye.
 	std::array<EyeFov, 2> fov {};
 	// Head pose the panel was rendered with, in the space GetResult used for flip_arg.
 	Pose    pose;

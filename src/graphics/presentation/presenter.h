@@ -64,6 +64,7 @@ public:
 		uint32_t                height      = 0;
 		uint32_t                layer_count = 0;
 		std::array<HmdLayer, 5> layers;
+		// As SetParam carries them: tan_out bounds the left side of either eye.
 		std::array<HmdFov, 2>   fov;
 		HmdPose                 pose;
 	};

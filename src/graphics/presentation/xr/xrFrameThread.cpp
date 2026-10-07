@@ -27,13 +27,11 @@ static vk::Format SrgbFormat(vk::Format format) {
 	}
 }
 
-// The guest describes each eye relative to the nose; OpenXR uses left/right angles.
-static XrFovf ToXrFov(const EyeFov& fov, uint32_t eye) {
-	const float outward = std::atan(fov.tan_out);
-	const float inward  = std::atan(fov.tan_in);
-	XrFovf      result {};
-	result.angleLeft  = eye == 0 ? -outward : -inward;
-	result.angleRight = eye == 0 ? inward : outward;
+// A frustum as SetParam carries it, where tan_out bounds the left side for either eye.
+static XrFovf ToXrFov(const EyeFov& fov) {
+	XrFovf result {};
+	result.angleLeft  = -std::atan(fov.tan_out);
+	result.angleRight = std::atan(fov.tan_in);
 	result.angleUp    = std::atan(fov.tan_top);
 	result.angleDown  = -std::atan(fov.tan_bottom);
 	return result;
@@ -282,7 +280,7 @@ bool FrameThread::RenderPanel(const std::array<XrView, 2>&                     e
 		auto& view = views[eye];
 		view       = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
 		view.pose  = world ? ComposePoses(head, eyes[eye].pose) : eyes[eye].pose;
-		view.fov   = ToXrFov(panel_view.fov[eye], eye);
+		view.fov   = ToXrFov(panel_view.fov[eye]);
 		view.subImage.swapchain        = m_swapchain.handle;
 		view.subImage.imageRect.offset = {0, 0};
 		view.subImage.imageRect.extent = {static_cast<int32_t>(extent.width),

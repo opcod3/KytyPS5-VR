@@ -455,9 +455,11 @@ eyes are not mirror images, report the per-component **maximum** of both eyes so
 over-renders slightly rather than clipping.
 
 On submit, convert the `fovL/fovR` the guest passed in `SetParam` back to angles:
-`angleLeft = -atan(tanOut)`, `angleRight = atan(tanIn)` for the left eye, and swapped for the
-right eye (the sample sets `fovR.tanIn = tanOut`). The runtime then reprojects exactly the
-frustum the game rendered.
+`angleLeft = -atan(tanOut)`, `angleRight = atan(tanIn)` for **both** eyes. The guest already
+swapped the right eye (the samples set `fovR.tanIn = tanOut`, `fovR.tanOut = tanIn`), so in
+`SetParam` `tanOut` bounds the left side of either eye. Swapping again mirrors the right eye's
+frustum, which only shows once the tangents are asymmetric. The runtime then reprojects exactly
+the frustum the game rendered.
 
 ### 5.4 Eye-in-head and controller offsets
 
