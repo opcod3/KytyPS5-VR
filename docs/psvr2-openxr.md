@@ -683,6 +683,11 @@ Build: `KYTY_ENABLE_OPENXR` (default on) finds the system `OpenXR` CMake package
   passes 2, just before `QueryBufferSizeAlign`), and Horizon ignores the return value. It only logs;
   the host runtime decides on positional reprojection.
 - Horizon enables mirroring with `area = CENTER` and asks for 119.88 Hz.
+- Horizon double-buffers the headset with two VR3D sources per buffer: source 0 is a 4000×2040
+  side-by-side scene (layer 0, opaque), source 1 two 2000×2040 per-eye textures blended over it
+  (`INTERPOLATED_ALPHA`, likely UI and hands). It renders nothing separate for the TV: no unused
+  source, and the main port is flipped once at start-up. The log shows the sources at registration
+  and the layer layout whenever it changes.
 - Horizon queries the FOV right after `sceHmd2Open`. By then the session is normally focused and
   the eye views are cached; if not, the ER15 defaults are returned.
 

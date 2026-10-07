@@ -15,8 +15,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <fmt/format.h>
 #include <mutex>
 #include <new>
+#include <string>
 
 namespace Libs {
 
@@ -620,7 +622,23 @@ static int32_t KYTY_SYSV_ABI Hmd2ReprojectionSetParam(int32_t index, int64_t fli
 		}
 	}
 
+	// The layer layout rarely changes, so log it when it does.
+	static std::string logged_layout;
+	std::string        layout = fmt::format("count={}", frame.count);
+	for (uint32_t i = 0; i < frame.count; i++) {
+		const auto& layer = frame.layers[i];
+		layout += fmt::format(" [type=0x{:x} src={} blend={} L={}x{}+{}+{} R={}x{}+{}+{}]",
+		                      layer.layer_type, layer.src_id, layer.blend_type,
+		                      layer.viewport[0].width, layer.viewport[0].height,
+		                      layer.viewport[0].x, layer.viewport[0].y, layer.viewport[1].width,
+		                      layer.viewport[1].height, layer.viewport[1].x, layer.viewport[1].y);
+	}
+
 	std::scoped_lock lock {g_frame_settings_mutex};
+	if (layout != logged_layout) {
+		LOGF("Hmd2: layers %s\n", layout.c_str());
+		logged_layout = std::move(layout);
+	}
 	g_frame_settings[static_cast<uint32_t>(index)] = frame;
 	return OK;
 }

@@ -1648,6 +1648,12 @@ static std::vector<Hmd2Source> Hmd2ParseSources(const void* data) {
 			}
 			default: EXIT("unsupported headset layer type 0x%x\n", guest.layer_type);
 		}
+		const auto& l = source.texture[0];
+		const auto& r = source.texture[1];
+		LOGF("Hmd2: buffer source %u type=0x%x L=0x%010" PRIx64 " %ux%u R=0x%010" PRIx64
+		     " %ux%u option=%p\n",
+		     i, guest.layer_type, l.Base40(), l.Width5() + 1u, l.Height5() + 1u, r.Base40(),
+		     r.Width5() + 1u, r.Height5() + 1u, guest.option);
 	}
 	return sources;
 }
