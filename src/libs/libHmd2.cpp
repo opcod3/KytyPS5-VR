@@ -30,6 +30,8 @@ constexpr int32_t ERROR_PARAMETER_NULL      = -1972240376; // 0x8a720008
 constexpr int32_t ERROR_PARAMETER_INVALID   = -1972240375; // 0x8a720009
 constexpr int32_t ERROR_REPROJECTION_ALREADY_INITIALIZED = -1972240372; // 0x8a72000c
 constexpr int32_t ERROR_REPROJECTION_IN_VR_MODE = -1972240356; // 0x8a72001c
+constexpr int32_t ERROR_REPROJECTION_NOT_IN_MIRRORING = -1972240355; // 0x8a72001d
+constexpr int32_t ERROR_REPROJECTION_IN_MIRRORING     = -1972240354; // 0x8a72001e
 
 struct SceHmd2InitializeParam {
 	void*   reserved0;
@@ -181,6 +183,19 @@ struct SceHmd2GazeResultForFoveatedRendering {
 	int32_t           reserved;
 };
 
+struct SceHmd2ReprojectionMirroringParam {
+	void* pWorkMemory;
+	void* pDisplayBuffer;
+};
+
+constexpr uint32_t MIRRORING_AREA_WIDE   = 0;
+constexpr uint32_t MIRRORING_AREA_CENTER = 1;
+
+struct SceHmd2ReprojectionMirroringOption {
+	uint32_t area;
+	uint32_t reserved[7];
+};
+
 constexpr int32_t           GAZE_TRACKING_STATUS_ENABLE = 0;
 constexpr SceHmd2GazeVector GAZE_FORWARD                = {0.0f, 0.0f, -1.0f};
 
@@ -212,15 +227,28 @@ static_assert(sizeof(SceHmd2GazeGetResultParam) == 16);
 static_assert(sizeof(SceHmd2GazeResult) == 56);
 static_assert(offsetof(SceHmd2GazeResult, gazeDirection) == 20);
 static_assert(sizeof(SceHmd2GazeResultForFoveatedRendering) == 24);
+static_assert(sizeof(SceHmd2ReprojectionMirroringParam) == 16);
+static_assert(sizeof(SceHmd2ReprojectionMirroringOption) == 32);
 
 static std::atomic<bool> g_initialized = false;
 static std::mutex g_reprojection_mutex;
 static std::atomic<ReprojectionState*> g_reprojection_state {nullptr};
 static std::mutex g_frame_settings_mutex;
 static std::array<FrameSettings, REPROJECTION_MAX_DISPLAY_BUFFERS> g_frame_settings {};
+static std::atomic<bool>     g_mirroring = false;
+static std::atomic<uint32_t> g_mirroring_area {MIRRORING_AREA_WIDE};
 
 ReprojectionState* GetReprojectionState() {
 	return g_reprojection_state.load(std::memory_order_acquire);
+}
+
+Mirroring GetMirroring() {
+	if (!g_mirroring.load(std::memory_order_acquire)) {
+		return Mirroring::Off;
+	}
+	return g_mirroring_area.load(std::memory_order_relaxed) == MIRRORING_AREA_CENTER
+	           ? Mirroring::Center
+	           : Mirroring::Wide;
 }
 
 bool GetReprojectionFrameSettings(uint32_t index, FrameSettings* settings) {
@@ -374,6 +402,9 @@ static int32_t KYTY_SYSV_ABI Hmd2ReprojectionEnableVrMode(uint64_t output_mode) 
 		return ERROR_REPROJECTION_IN_VR_MODE;
 	}
 	LOGF("Hmd2: VR output mode=0x%" PRIx64 "\n", output_mode);
+	if (Graphics::Xr::IsActive()) {
+		Graphics::Xr::RequestRefreshRate(OutputModeRefreshRate(output_mode));
+	}
 	return OK;
 }
 
@@ -579,9 +610,49 @@ static int32_t KYTY_SYSV_ABI Hmd2ReprojectionSetParam(int32_t index, int64_t fli
 	return OK;
 }
 
+// The main window mirrors the headset from host memory, so the guest buffers are only tokens.
+static int32_t KYTY_SYSV_ABI
+Hmd2ReprojectionEnableMirroring(const SceHmd2ReprojectionMirroringParam* param) {
+	if (GetReprojectionState() == nullptr) {
+		return ERROR_REPROJECTION_NOT_INITIALIZED;
+	}
+	if (param == nullptr || param->pWorkMemory == nullptr || param->pDisplayBuffer == nullptr) {
+		return ERROR_PARAMETER_NULL;
+	}
+	if (g_mirroring.exchange(true, std::memory_order_acq_rel)) {
+		return ERROR_REPROJECTION_IN_MIRRORING;
+	}
+	LOGF("Hmd2: mirroring enabled\n");
+	return OK;
+}
+
+static int32_t KYTY_SYSV_ABI Hmd2ReprojectionDisableMirroring() {
+	if (GetReprojectionState() == nullptr) {
+		return ERROR_REPROJECTION_NOT_INITIALIZED;
+	}
+	if (!g_mirroring.exchange(false, std::memory_order_acq_rel)) {
+		return ERROR_REPROJECTION_NOT_IN_MIRRORING;
+	}
+	LOGF("Hmd2: mirroring disabled\n");
+	return OK;
+}
+
+static int32_t KYTY_SYSV_ABI
+Hmd2ReprojectionSetMirroringOption(const SceHmd2ReprojectionMirroringOption* option) {
+	if (option == nullptr) {
+		return ERROR_PARAMETER_NULL;
+	}
+	if (option->area != MIRRORING_AREA_WIDE && option->area != MIRRORING_AREA_CENTER) {
+		return ERROR_PARAMETER_INVALID;
+	}
+	g_mirroring_area.store(option->area, std::memory_order_relaxed);
+	LOGF("Hmd2: mirroring area=%u\n", option->area);
+	return OK;
+}
+
 static Graphics::SizeAlign KYTY_SYSV_ABI Hmd2ReprojectionGetMirroringWorkMemorySizeAlign() {
-	// Mirroring (social-screen) is not emulated; hand back a small, suitably aligned allocation
-	// so the game's buffer bookkeeping succeeds.
+	// The main window mirrors the headset from host memory; hand back a small, suitably aligned
+	// allocation so the game's buffer bookkeeping succeeds.
 	const Graphics::SizeAlign size {0x1000, 0x100};
 	LOGF("Hmd2: mirroring work size=%" PRIu64 " alignment=%zu\n", size.m_size, size.m_align);
 	return size;
@@ -617,6 +688,9 @@ LIB_DEFINE(InitHmd2_1) {
 	LIB_FUNC("E+b+c1Idyew", Hmd2::Hmd2GetFieldOfView);                       // sceHmd2GetFieldOfView
 	LIB_FUNC("Pb1d+j-bBSc", Hmd2::Hmd2ReprojectionGetMirroringWorkMemorySizeAlign);    // sceHmd2ReprojectionGetMirroringWorkMemorySizeAlign
 	LIB_FUNC("wEO+gMHs9NU", Hmd2::Hmd2ReprojectionGetMirroringDisplayBufferSizeAlign); // sceHmd2ReprojectionGetMirroringDisplayBufferSizeAlign
+	LIB_FUNC("Qx7SkcgAzok", Hmd2::Hmd2ReprojectionEnableMirroring);          // sceHmd2ReprojectionEnableMirroring
+	LIB_FUNC("asilo8VNGvg", Hmd2::Hmd2ReprojectionDisableMirroring);         // sceHmd2ReprojectionDisableMirroring
+	LIB_FUNC("+seEJVlljr0", Hmd2::Hmd2ReprojectionSetMirroringOption);       // sceHmd2ReprojectionSetMirroringOption
 
 	LIB_FUNC("QU2M1pPNbaY", Hmd2::Hmd2Stub);  // sceHmd2Terminate
 	LIB_FUNC("oPhtjySuHa8", Hmd2::Hmd2Stub);  // sceHmd2Close
@@ -628,9 +702,6 @@ LIB_DEFINE(InitHmd2_1) {
 	LIB_FUNC("64ERZWVFBTE", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionSetUserEventEnd
 	LIB_FUNC("rjAd4nCY4DM", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionClearUserEventEnd
 	LIB_FUNC("hA9LshbSkzw", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionSetRenderConfig
-	LIB_FUNC("Qx7SkcgAzok", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionEnableMirroring
-	LIB_FUNC("asilo8VNGvg", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionDisableMirroring
-	LIB_FUNC("+seEJVlljr0", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionSetMirroringOption
 	LIB_FUNC("wj1kOyNF4vM", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionDisableVrMode
 	LIB_FUNC("8GkaY2B7opM", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionGetStatus
 }

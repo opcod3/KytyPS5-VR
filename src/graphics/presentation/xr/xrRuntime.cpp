@@ -218,6 +218,11 @@ bool Runtime::CreateInstance() {
 		return false;
 	}
 #endif
+	if (m_ext.refresh_rate) {
+		m_ext.refresh_rate =
+		    GetFunction(m_instance, "xrEnumerateDisplayRefreshRatesFB", m_enumerate_refresh_rates) &&
+		    GetFunction(m_instance, "xrRequestDisplayRefreshRateFB", m_request_refresh_rate);
+	}
 	return GetFunction(m_instance, "xrGetVulkanGraphicsRequirements2KHR",
 	                   m_get_graphics_requirements) &&
 	       GetFunction(m_instance, "xrCreateVulkanInstanceKHR", m_create_vulkan_instance) &&
@@ -513,6 +518,31 @@ void Runtime::PanelCopySubmitted() {
 	m_panel.ready = m_panel.image.image != nullptr;
 }
 
+void Runtime::RequestRefreshRate(float hz) {
+	if (!m_ext.refresh_rate || m_session == XR_NULL_HANDLE) {
+		LOGF("OpenXR: cannot request %.2f Hz; the runtime keeps its own rate\n", hz);
+		return;
+	}
+	uint32_t count = 0;
+	if (!Check(m_enumerate_refresh_rates(m_session, 0, &count, nullptr),
+	           "xrEnumerateDisplayRefreshRatesFB") ||
+	    count == 0) {
+		return;
+	}
+	std::vector<float> rates(count);
+	if (!Check(m_enumerate_refresh_rates(m_session, count, &count, rates.data()),
+	           "xrEnumerateDisplayRefreshRatesFB")) {
+		return;
+	}
+	// The runtime accepts only a rate it enumerated.
+	const float nearest = *std::min_element(rates.begin(), rates.end(), [hz](float a, float b) {
+		return std::abs(a - hz) < std::abs(b - hz);
+	});
+	if (Check(m_request_refresh_rate(m_session, nearest), "xrRequestDisplayRefreshRateFB")) {
+		LOGF("OpenXR: requested %.2f Hz for %.2f Hz\n", nearest, hz);
+	}
+}
+
 void Runtime::SetVblankHandler(std::function<void()> handler) {
 	Common::LockGuard lock(m_vblank_mutex);
 	m_vblank_handler = std::move(handler);
@@ -588,6 +618,13 @@ void Runtime::PollEvents() {
 					m_bounds_stale = true;
 				}
 				break;
+			case XR_TYPE_EVENT_DATA_DISPLAY_REFRESH_RATE_CHANGED_FB: {
+				const auto* changed =
+				    reinterpret_cast<const XrEventDataDisplayRefreshRateChangedFB*>(&event);
+				LOGF("OpenXR: refresh rate %.2f -> %.2f Hz\n", changed->fromDisplayRefreshRate,
+				     changed->toDisplayRefreshRate);
+				break;
+			}
 			case XR_TYPE_EVENT_DATA_EVENTS_LOST:
 				LOGF("OpenXR: %u events lost\n",
 				     reinterpret_cast<const XrEventDataEventsLost*>(&event)->lostEventCount);
@@ -770,6 +807,12 @@ void PanelCopySubmitted() {
 	g_runtime->PanelCopySubmitted();
 }
 
+void RequestRefreshRate(float hz) {
+	if (g_runtime != nullptr) {
+		g_runtime->RequestRefreshRate(hz);
+	}
+}
+
 void SetVblankHandler(std::function<void()> handler) {
 	if (g_runtime != nullptr) {
 		g_runtime->SetVblankHandler(std::move(handler));
@@ -899,6 +942,8 @@ void RecordPanelCopy(vk::CommandBuffer /*command*/, vk::Image /*source*/, vk::Fo
 }
 
 void PanelCopySubmitted() {}
+
+void RequestRefreshRate(float /*hz*/) {}
 
 void SetVblankHandler(std::function<void()> /*handler*/) {}
 

@@ -290,8 +290,10 @@ public:
 	[[nodiscard]] bool   NeedsResize() const;
 	[[nodiscard]] Status AcquireNextImage(CommandScheduler& scheduler);
 	[[nodiscard]] bool   PrepareSystemOverlay();
+	// Scales source, or the part of it in source_rect, to the whole window.
 	void     RecordPresentCommands(CommandBuffer& command, Presenter::Frame* source,
-	                               const Presenter::Layer& overlay, bool draw_system_overlay);
+	                               const Presenter::Layer& overlay, bool draw_system_overlay,
+	                               const vk::Rect2D* source_rect = nullptr);
 	uint64_t Submit(CommandScheduler& scheduler);
 	[[nodiscard]] Status Present();
 
@@ -305,6 +307,7 @@ public:
 		m_hdr_requested = hdr;
 		return changed;
 	}
+	[[nodiscard]] vk::Extent2D Extent() const noexcept { return m_extent; }
 
 private:
 	[[nodiscard]] vk::SurfaceKHR             Surface() const;
@@ -443,7 +446,9 @@ struct Presenter::Impl {
 		              {}, command);
 		return view;
 	}
-	void Present();
+	// Presents the main window; with mirror, the left eye of the headset panel replaces the
+	// main bus layer.
+	void Present(const HmdMirror* mirror = nullptr);
 	void PresentHmd();
 
 	RenderContext&        renderer;
@@ -890,7 +895,8 @@ void Swapchain::DrawOverlay(vk::CommandBuffer command, const Presenter::Layer& l
 }
 
 void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* source,
-                                      const Presenter::Layer& overlay, bool draw_system_overlay) {
+                                      const Presenter::Layer& overlay, bool draw_system_overlay,
+                                      const vk::Rect2D* source_rect) {
 	EXIT_IF(m_image_index >= m_images.size());
 	auto       vk_command      = command.Handle();
 	const bool draw_overlay    = overlay.frame != nullptr;
@@ -931,6 +937,14 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* 
 		region.srcOffsets[1].x               = static_cast<int>(source->image.extent.width);
 		region.srcOffsets[1].y               = static_cast<int>(source->image.extent.height);
 		region.srcOffsets[1].z               = 1;
+		if (source_rect != nullptr) {
+			region.srcOffsets[0].x = source_rect->offset.x;
+			region.srcOffsets[0].y = source_rect->offset.y;
+			region.srcOffsets[1].x =
+			    source_rect->offset.x + static_cast<int>(source_rect->extent.width);
+			region.srcOffsets[1].y =
+			    source_rect->offset.y + static_cast<int>(source_rect->extent.height);
+		}
 		region.dstSubresource.aspectMask     = vk::ImageAspectFlagBits::eColor;
 		region.dstSubresource.mipLevel       = 0;
 		region.dstSubresource.baseArrayLayer = 0;
@@ -1153,6 +1167,43 @@ bool Presenter::PresentLastFrame() {
 	return true;
 }
 
+bool Presenter::PresentHmdMirror(const HmdMirror& mirror) {
+	Common::LockGuard lock(m_impl->present_mutex);
+	{
+		Common::LockGuard hmd_lock(m_impl->hmd_present_mutex);
+		if (m_impl->hmd_layer.frame == nullptr) {
+			return false;
+		}
+	}
+	m_impl->Present(&mirror);
+	return true;
+}
+
+// The part of the left eye shown in a window of the given size: as wide as the area asks, at the
+// window's aspect ratio, centred on the eye's optical axis as far as the eye allows.
+static vk::Rect2D MirrorRect(const Presenter::Frame& frame, vk::Extent2D window,
+                             const Presenter::HmdMirror& mirror) {
+	const float eye_width  = static_cast<float>(frame.image.extent.width / 2);
+	const float eye_height = static_cast<float>(frame.image.extent.height);
+	const float aspect     = static_cast<float>(window.width) / static_cast<float>(window.height);
+	float       width      = mirror.center ? eye_width / 2.0f : eye_width;
+	float       height     = width / aspect;
+	if (height > eye_height) {
+		height = eye_height;
+		width  = height * aspect;
+	}
+	// The image is rectilinear, so tangent 0 sits at tan_out / (tan_out + tan_in) of the width.
+	const auto& fov     = frame.hmd_fov[0];
+	const float across  = fov.tan_out + fov.tan_in;
+	const float down    = fov.tan_top + fov.tan_bottom;
+	const float axis_x  = across > 0.0f ? eye_width * fov.tan_out / across : eye_width / 2.0f;
+	const float axis_y  = down > 0.0f ? eye_height * fov.tan_top / down : eye_height / 2.0f;
+	const float x       = std::clamp(axis_x - width / 2.0f, 0.0f, eye_width - width);
+	const float y       = std::clamp(axis_y - height / 2.0f, 0.0f, eye_height - height);
+	return {{static_cast<int32_t>(x), static_cast<int32_t>(y)},
+	        {static_cast<uint32_t>(width), static_cast<uint32_t>(height)}};
+}
+
 bool Presenter::IsGuestPaused() const noexcept {
 	return m_impl->window.loop.paused.load(std::memory_order_acquire);
 }
@@ -1219,7 +1270,7 @@ void Presenter::ClearLayer(int bus) {
 	}
 }
 
-void Presenter::Impl::Present() {
+void Presenter::Impl::Present(const HmdMirror* mirror) {
 	KYTY_PROFILER_FUNCTION();
 
 	const auto overlay_visual = GetSystemOverlayVisualState();
@@ -1237,19 +1288,33 @@ void Presenter::Impl::Present() {
 			RecoverSwapchain(status);
 			continue;
 		}
+		// A mirrored panel stays the headset's while it is read; the OpenXR frame thread takes
+		// this lock before the renderer's.
+		if (mirror != nullptr) {
+			hmd_present_mutex.Lock();
+		}
 		{
 			Common::LockGuard render_lock(renderer.GetMutex());
 			auto&             command = present_scheduler.BeginCommand();
 			const bool        draw_system_overlay =
 			    overlay_visual.active && swapchain.PrepareSystemOverlay();
-			swapchain.RecordPresentCommands(command, layers[0].frame, layers[1],
-			                                draw_system_overlay);
+			auto* source = mirror != nullptr ? hmd_layer.frame : layers[0].frame;
+			vk::Rect2D rect {};
+			if (mirror != nullptr && source != nullptr) {
+				rect = MirrorRect(*source, swapchain.Extent(), *mirror);
+			}
+			swapchain.RecordPresentCommands(command, source, layers[1], draw_system_overlay,
+			                                mirror != nullptr && source != nullptr ? &rect
+			                                                                       : nullptr);
 			const auto tick = swapchain.Submit(present_scheduler);
-			for (const auto& layer: layers) {
-				if (layer.frame != nullptr) {
-					layer.frame->present_tick = tick;
+			for (auto* frame: {source, layers[1].frame}) {
+				if (frame != nullptr) {
+					frame->present_tick = std::max(frame->present_tick, tick);
 				}
 			}
+		}
+		if (mirror != nullptr) {
+			hmd_present_mutex.Unlock();
 		}
 		status = swapchain.Present();
 		if (status != Swapchain::Status::Success) {

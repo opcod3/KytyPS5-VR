@@ -11,6 +11,15 @@ inline constexpr uint32_t PANEL_WIDTH  = 4000;
 inline constexpr uint32_t PANEL_HEIGHT = 2040;
 inline constexpr uint64_t OUTPUT_MODE_89_91HZ  = 0x2000c;
 inline constexpr uint64_t OUTPUT_MODE_119_88HZ = 0x2000f;
+
+// Refresh rate of a headset output mode; 0 for other modes.
+[[nodiscard]] inline constexpr float OutputModeRefreshRate(uint64_t mode) {
+	switch (mode) {
+		case OUTPUT_MODE_89_91HZ: return 89.91f;
+		case OUTPUT_MODE_119_88HZ: return 119.88f;
+		default: return 0.0f;
+	}
+}
 inline constexpr int32_t ERROR_REPROJECTION_NOT_INITIALIZED = -1972240373; // 0x8a72000b
 
 inline constexpr uint32_t REPROJECTION_MAX_LAYERS          = 5;
@@ -79,7 +88,11 @@ struct FrameSettings {
 	std::array<LayerSetting, REPROJECTION_MAX_LAYERS> layers {};
 };
 
+// What the main window shows of the headset (sceHmd2ReprojectionEnableMirroring).
+enum class Mirroring : uint8_t { Off, Wide, Center };
+
 [[nodiscard]] ReprojectionState* GetReprojectionState();
+[[nodiscard]] Mirroring          GetMirroring();
 [[nodiscard]] bool GetReprojectionFrameSettings(uint32_t index, FrameSettings* settings);
 
 } // namespace Libs::Hmd2

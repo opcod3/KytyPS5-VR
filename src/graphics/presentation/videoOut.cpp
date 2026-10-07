@@ -352,6 +352,7 @@ public:
 	void VblankBegin(bool headset);
 	void VblankEnd(bool headset);
 	void PresentThread(std::stop_token token);
+	bool PresentMirror();
 	void HeadsetVblank();
 
 private:
@@ -1020,7 +1021,9 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 		const auto period  = std::max(frequency / refresh, uint64_t {1});
 
 		if (m_presenter.IsGuestPaused()) {
-			(void)m_presenter.PresentLastFrame();
+			if (!m_presenter.PresentLastFrame()) {
+				(void)PresentMirror();
+			}
 			const auto frame_end = Common::Timer::QueryPerformanceCounter();
 			total_wait +=
 			    static_cast<int64_t>(period) - static_cast<int64_t>(frame_end - frame_begin);
@@ -1029,6 +1032,9 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 
 		VblankBegin(false);
 		bool presented = m_flip_queue.Flip(0, false);
+		if (!presented) {
+			presented = PresentMirror();
+		}
 		if (!presented && m_presenter.NeedsSystemOverlayRefresh()) {
 			if (m_presenter.PresentLastFrame()) {
 				presented = true;
@@ -1067,6 +1073,27 @@ void VideoOutDriver::Impl::PresentThread(std::stop_token token) {
 		const auto frame_end = Common::Timer::QueryPerformanceCounter();
 		total_wait += static_cast<int64_t>(period) - static_cast<int64_t>(frame_end - frame_begin);
 	}
+}
+
+// A guest that enabled mirroring shows the headset on the main window. The SDK asks for the main
+// port to be closed, but Horizon Call of the Mountain keeps it open after flipping it once, so the
+// mirror yields only to a main port that is still flipping.
+bool VideoOutDriver::Impl::PresentMirror() {
+	const auto mirroring = Hmd2::GetMirroring();
+	if (mirroring == Hmd2::Mirroring::Off) {
+		return false;
+	}
+	constexpr uint64_t MAIN_FLIP_HOLD_US = 500000;
+	// Handles are bus positions in VIDEO_OUT_BUSES plus one.
+	static_assert(VIDEO_OUT_BUSES[0] == VIDEO_OUT_BUS_TYPE_MAIN);
+	if (auto* main = Get(1); main != nullptr) {
+		Common::LockGuard lock(main->mutex);
+		if (main->opened && main->flip_status.count != 0 &&
+		    LibKernel::KernelGetProcessTime() - main->flip_status.processTime < MAIN_FLIP_HOLD_US) {
+			return false;
+		}
+	}
+	return m_presenter.PresentHmdMirror({mirroring == Hmd2::Mirroring::Center});
 }
 
 // Runs on the OpenXR frame thread. The headset keeps showing its last panel while paused.
@@ -2150,7 +2177,11 @@ KYTY_SYSV_ABI int VideoOutConfigureOutput(int handle, uint64_t mode,
 	ctx->output_mode = mode;
 	TriggerVideoOutEvents(*ctx, VideoOutEventKind::OutputMode,
 	                      reinterpret_cast<void*>(ctx->output_mode));
+	const bool headset = ctx->bus == VIDEO_OUT_BUS_TYPE_HMD2_MAIN;
 	ctx->mutex.Unlock();
+	if (headset && Graphics::Xr::IsActive() && Hmd2::OutputModeRefreshRate(mode) != 0.0f) {
+		Graphics::Xr::RequestRefreshRate(Hmd2::OutputModeRefreshRate(mode));
+	}
 
 	return OK;
 }

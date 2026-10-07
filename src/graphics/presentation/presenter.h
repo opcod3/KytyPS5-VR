@@ -68,6 +68,12 @@ public:
 		HmdPose                 pose;
 	};
 
+	// Which part of the headset's left eye the main window mirrors.
+	struct HmdMirror {
+		// False: the whole eye width. True: the central half, i.e. magnified.
+		bool center = false;
+	};
+
 	explicit Presenter(WindowContext& window);
 	~Presenter();
 	KYTY_CLASS_NO_COPY(Presenter);
@@ -79,6 +85,8 @@ public:
 	[[nodiscard]] Frame&         PrepareBlankFrame(uint32_t width, uint32_t height, bool opaque,
 	                                               CommandBuffer* producer = nullptr);
 	[[nodiscard]] bool           PresentLastFrame();
+	// Shows the newest headset panel in the main window; false before the first one.
+	[[nodiscard]] bool           PresentHmdMirror(const HmdMirror& mirror);
 	[[nodiscard]] bool           IsGuestPaused() const noexcept;
 	[[nodiscard]] bool           IsHdrSupported() const noexcept;
 	[[nodiscard]] bool           NeedsSystemOverlayRefresh() const noexcept;

@@ -111,6 +111,8 @@ public:
 
 	[[nodiscard]] const Extensions& GetExtensions() const { return m_ext; }
 
+	void RequestRefreshRate(float hz);
+
 	// Clock (xrClock.cpp). Guest time is KernelGetProcessTime microseconds.
 	void                   CalibrateClock();
 	[[nodiscard]] XrTime   Now() const;
@@ -195,6 +197,8 @@ private:
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 	PFN_xrConvertTimespecTimeToTimeKHR m_convert_timespec = nullptr;
 #endif
+	PFN_xrEnumerateDisplayRefreshRatesFB m_enumerate_refresh_rates = nullptr;
+	PFN_xrRequestDisplayRefreshRateFB    m_request_refresh_rate    = nullptr;
 
 	GraphicContext*           m_graphics        = nullptr;
 	XrSession                 m_session         = XR_NULL_HANDLE;

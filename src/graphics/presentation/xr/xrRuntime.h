@@ -143,6 +143,9 @@ void StopSession();
 bool GetFieldOfView(EyeFov* fov);
 // Distance between the eyes in metres; false until known.
 bool GetEyeSeparation(float* meters);
+// Asks the runtime to refresh at the supported rate nearest to hz. No effect when the runtime
+// cannot change its rate (XR_FB_display_refresh_rate).
+void RequestRefreshRate(float hz);
 
 // Display time of the frame the guest starts with flip_arg: the first headset refresh it can
 // still make. BeginFrame binds flip_arg to a refresh; GetPredictedDisplayTime looks it up and

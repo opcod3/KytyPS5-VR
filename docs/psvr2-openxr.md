@@ -36,6 +36,13 @@ What `--vr-mode openxr` does today:
   the frame thread fires the HMD2 port's pre-vblank and vblank events and completes its oldest
   ready flip, so the guest flips at the headset rate and the new panel goes out in that XR frame.
   The main present thread no longer touches that port.
+- **Refresh rate.** `EnableVrMode` and `sceVideoOutConfigureOutput` on the HMD2 port request
+  the enumerated rate nearest to 89.91 or 119.88 Hz through `XR_FB_display_refresh_rate`
+  (`Xr::RequestRefreshRate`). Monado's Qwerty HMD only offers 60 Hz.
+- **Mirroring** (`Hmd2::GetMirroring`, `Presenter::PresentHmdMirror`). With mirroring enabled,
+  the main window shows the left eye of the newest headset panel, cropped to the window's aspect
+  ratio and centred on the eye's optical axis (from the `SetParam` FOV). `WIDE` uses the whole eye
+  width; `CENTER` uses the central half.
 - **Tracking** (`xr/xrTracking.cpp`, `xr/xrClock.cpp`). `sceVrTracker2GetResult` for the HMD and
   controllers, coordinate systems, recentre, `LocateCoordinateSystem` and the play-area calls.
   `sceHmd2GetFieldOfView`, device status, mount state and lens separation come from the runtime.
@@ -66,6 +73,9 @@ Deliberate deviations from the plan below:
   flip master/slave pair across the two clocks `EXIT_NOT_IMPLEMENTED`s.
 - While the session is not running, the frame thread still fires HMD2 vblanks about every
   11 ms, so a guest waiting on them does not hang.
+- The SDK says mirroring needs the main port closed. Horizon keeps it open after flipping it
+  once at start-up, so the mirror only gives way to a main port that has flipped in the last
+  500 ms.
 - Windows: `Xr::Initialize` refuses, because guest-time conversion needs
   `XR_KHR_win32_convert_performance_counter_time`, which is not implemented.
 
@@ -662,6 +672,7 @@ Build: `KYTY_ENABLE_OPENXR` (default on) finds the system `OpenXR` CMake package
   library `Hmd2ReprojectionPositional`), which is newer than SDK 4.00. It takes one `int` (Horizon
   passes 2, just before `QueryBufferSizeAlign`), and Horizon ignores the return value. It only logs;
   the host runtime decides on positional reprojection.
+- Horizon enables mirroring with `area = CENTER` and asks for 119.88 Hz.
 - Horizon queries the FOV right after `sceHmd2Open`. By then the session is normally focused and
   the eye views are cached; if not, the ER15 defaults are returned.
 
@@ -672,8 +683,7 @@ In rough order of value:
 1. **UI2D/VR2D layers (phase 5).** `Hmd2Composition` still `EXIT_NOT_IMPLEMENTED`s on them.
    Store UI2D placement in `LayerSetting`, give each its own quad swapchain, and submit
    `XrCompositionLayerQuad` after the projection layer (§4.3). Find a title that uses them first.
-2. **`GetStatus`, user events, mirroring, `SetRenderConfig`, refresh-rate requests**
-   (`XR_FB_display_refresh_rate` is already enabled when present). See §4.2. For
+2. **`GetStatus`, user events, `SetRenderConfig`** (§4.2). Horizon calls none of them. For
    `RENDER60_AT_REPROJECTION120`, have `HeadsetVblank` skip every second XR frame.
 3. **Gaze** via `XR_EXT_eye_gaze_interaction` (enabled when present; nothing reads it yet).
 4. **`scePadVrControllerRead` / `ReadCombinedState`.** NIDs still need computing; build them from
