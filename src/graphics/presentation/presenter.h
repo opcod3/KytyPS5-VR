@@ -17,7 +17,8 @@ struct WindowContext;
 
 class Presenter final {
 public:
-	// Video-out bus of the PSVR2 headset; its layer is presented to a separate window.
+	// Video-out bus of the PSVR2 headset; its layer goes to the OpenXR runtime, or to a separate
+	// window with the virtual headset.
 	static constexpr int HMD_BUS = 32;
 
 	struct Frame;
@@ -38,6 +39,21 @@ public:
 		uint32_t              width  = 0;
 		uint32_t              height = 0;
 	};
+	// Tangents of the frustum an eye was rendered with; out is temporal, in is nasal.
+	struct HmdFov {
+		float tan_out    = 0.0f;
+		float tan_in     = 0.0f;
+		float tan_top    = 0.0f;
+		float tan_bottom = 0.0f;
+	};
+	// The head pose the panel was rendered with, in the tracking space of its flip_arg.
+	struct HmdPose {
+		std::array<float, 3> position {};
+		std::array<float, 4> orientation {};
+		int64_t              flip_arg    = 0;
+		bool                 valid       = false;
+		bool                 head_locked = false;
+	};
 	struct HmdLayer {
 		std::array<HmdEye, 2> eyes;
 		HmdBlend              blend = HmdBlend::Opaque;
@@ -48,6 +64,8 @@ public:
 		uint32_t                height      = 0;
 		uint32_t                layer_count = 0;
 		std::array<HmdLayer, 5> layers;
+		std::array<HmdFov, 2>   fov;
+		HmdPose                 pose;
 	};
 
 	explicit Presenter(WindowContext& window);

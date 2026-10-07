@@ -30,6 +30,30 @@ struct ReprojectionState {
 	std::atomic<uint32_t> timing_us {3000};
 };
 
+// Tangents of one eye's frustum; out is temporal, in is nasal.
+struct FieldOfView {
+	float tan_out;
+	float tan_in;
+	float tan_top;
+	float tan_bottom;
+};
+
+// Virtual ER15 field of view: 55/42.5/51.2/51.2 degrees.
+// These tangents describe that geometry, not bit-exact firmware output.
+inline constexpr FieldOfView DEFAULT_FIELD_OF_VIEW {1.4281480312f, 0.9163311720f, 1.2437491417f,
+                                                    1.2437491417f};
+
+// The head pose a VR3D layer was rendered with, as sceVrTracker2GetResult reported it.
+struct RenderPose {
+	std::array<float, 3> position {};
+	std::array<float, 4> orientation {}; // x, y, z, w
+	int64_t              flip_arg = 0;
+	// The guest passed a usable pose.
+	bool valid = false;
+	// disableReprojection: shown head-locked, with distortion only.
+	bool head_locked = false;
+};
+
 struct TextureViewport {
 	uint32_t width;
 	uint32_t height;
@@ -43,6 +67,9 @@ struct LayerSetting {
 	uint32_t                       src_id;
 	uint32_t                       blend_type;
 	std::array<TextureViewport, 2> viewport;
+	// The frustums a VR3D layer was rendered with.
+	std::array<FieldOfView, 2> fov {DEFAULT_FIELD_OF_VIEW, DEFAULT_FIELD_OF_VIEW};
+	RenderPose                 pose {};
 };
 
 // The layers sceHmd2ReprojectionSetParam assigned to one display buffer.

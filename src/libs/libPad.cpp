@@ -1,5 +1,6 @@
 #include "common/abi.h"
 #include "common/logging/log.h"
+#include "graphics/presentation/xr/xrRuntime.h"
 #include "libs/controller.h"
 #include "libs/errno.h"
 #include "libs/libs.h"
@@ -198,6 +199,15 @@ PadVrControllerGetDeviceInformation(int handle, PadVrControllerDeviceInformation
 	info->stick_dead_zone = Controller::controller_get_axis(-32768, 32767, 8000) - 128;
 	info->connected_count = 1;
 	info->connected       = true;
+	if (Graphics::Xr::IsActive()) {
+		Graphics::Xr::ControllerState state;
+		(void)Graphics::Xr::GetControllerState(handle == Controller::PAD_HANDLE_VR_CONTROLLER_LEFT
+		                                           ? Graphics::Xr::Hand::Left
+		                                           : Graphics::Xr::Hand::Right,
+		                                       &state);
+		info->connected_count = static_cast<uint8_t>(state.connected_count);
+		info->connected       = state.connected;
+	}
 
 	return OK;
 }

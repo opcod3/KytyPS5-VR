@@ -160,6 +160,18 @@ include_directories(
 
 set(KYTY_VERSION "${PROJECT_VERSION}")
 
+option(KYTY_ENABLE_OPENXR "Drive PSVR2 titles through an OpenXR runtime" ON)
+set(KYTY_OPENXR OFF)
+if(KYTY_ENABLE_OPENXR)
+	find_package(OpenXR CONFIG QUIET)
+	if(OpenXR_FOUND)
+		set(KYTY_OPENXR ON)
+		message(STATUS "OpenXR loader found: VR mode openxr is available")
+	else()
+		message(STATUS "OpenXR loader not found: VR mode openxr is unavailable")
+	endif()
+endif()
+
 configure_file(
   ${KYTY_SOURCE_DIR}/cmake_config.h.in
   ${PROJECT_BINARY_DIR}/cmake_config.h
@@ -243,6 +255,8 @@ file(GLOB kyty_emulator_src CONFIGURE_DEPENDS
 	"${KYTY_SOURCE_DIR}/graphics/presentation/*.h"
 	"${KYTY_SOURCE_DIR}/graphics/presentation/window/*.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/presentation/window/*.h"
+	"${KYTY_SOURCE_DIR}/graphics/presentation/xr/*.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/presentation/xr/*.h"
 	"${KYTY_SOURCE_DIR}/kernel/*.cpp"
 	"${KYTY_SOURCE_DIR}/kernel/*.h"
 	"${KYTY_SOURCE_DIR}/loader/*.cpp"
@@ -338,6 +352,10 @@ if (KYTY_CLANG_CL)
 endif()
 
 set(kyty_emulator_link_libraries common Vulkan::Headers spirv-tools-opt spirv-tools SDL3::SDL3-static imgui xxhash FFmpeg::ffmpeg fmt::fmt nlohmann_json::nlohmann_json LibAtrac9 kyty_git_version Zydis::Zydis xbyak::xbyak opus)
+
+if(KYTY_OPENXR)
+	list(APPEND kyty_emulator_link_libraries OpenXR::openxr_loader)
+endif()
 
 # Linux system libraries.
 if(LINUX)

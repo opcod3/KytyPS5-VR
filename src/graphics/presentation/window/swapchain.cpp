@@ -13,6 +13,7 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/presentation/hmdCompositor.h"
+#include "graphics/presentation/xr/xrRuntime.h"
 #include "graphics/presentation/presenter.h"
 #include "graphics/presentation/systemOverlay.h"
 #include "graphics/presentation/videoOut.h"
@@ -39,6 +40,9 @@ struct Presenter::Frame {
 	bool          hdr              = false;
 	bool          blank            = false;
 	bool          color_attachment = false;
+	// Headset panels only: the frustums the eyes were rendered with.
+	std::array<HmdFov, 2> hmd_fov {};
+	HmdPose               hmd_pose {};
 
 	// A render-target frame is also drawn into as a color attachment.
 	void Configure(GraphicContext& graphics, vk::Extent2D extent, vk::Format format,
@@ -1072,6 +1076,8 @@ Presenter::Frame& Presenter::PrepareHmdFrame(CommandBuffer&        buffer,
 	Common::LockGuard  render_lock(m_impl->renderer.GetMutex());
 	auto&              graphics = m_impl->window.graphic_ctx;
 	frame->Configure(graphics, extent, format, true);
+	frame->hmd_fov  = composition.fov;
+	frame->hmd_pose = composition.pose;
 	buffer.EndRendering();
 	auto command = buffer.Handle();
 
@@ -1250,6 +1256,32 @@ void Presenter::Impl::Present() {
 
 void Presenter::Impl::PresentHmd() {
 	KYTY_PROFILER_FUNCTION();
+
+	if (Xr::IsActive()) {
+		// The OpenXR frame thread shows the newest panel at the headset's own rate.
+		auto* frame = hmd_layer.frame;
+		EXIT_IF(frame == nullptr);
+		Xr::PanelView view {};
+		for (uint32_t eye = 0; eye < 2; eye++) {
+			const auto& f = frame->hmd_fov[eye];
+			view.fov[eye] = {f.tan_out, f.tan_in, f.tan_top, f.tan_bottom};
+		}
+		const auto& pose = frame->hmd_pose;
+		view.pose        = {pose.position, pose.orientation};
+		view.flip_arg    = pose.flip_arg;
+		view.world_locked = pose.valid && !pose.head_locked;
+		{
+			Common::LockGuard render_lock(renderer.GetMutex());
+			auto&             command = present_scheduler.BeginCommand();
+			frame->Transit(command.Handle(), vk::ImageLayout::eTransferSrcOptimal,
+			               vk::AccessFlagBits2::eTransferRead);
+			Xr::RecordPanelCopy(command.Handle(), frame->image.image, frame->image.format,
+			                    {frame->image.extent.width, frame->image.extent.height}, view);
+			frame->present_tick = present_scheduler.Submit();
+		}
+		Xr::PanelCopySubmitted();
+		return;
+	}
 
 	auto* target = window.vr_window.get();
 	EXIT_IF(target == nullptr || hmd_layer.frame == nullptr);

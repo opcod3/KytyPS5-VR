@@ -27,6 +27,10 @@ enum class LogDirection { Silent, Console, File };
 
 enum class PresentMode { Fifo, Mailbox, Immediate };
 
+// Off: no headset. Virtual: fixed poses, headset output in a desktop window.
+// OpenXr: a host OpenXR runtime; falls back to Virtual when none is available.
+enum class VrMode { Off, Virtual, OpenXr };
+
 using Keymap = std::vector<std::string>;
 using ControllerColor = std::array<uint8_t, 3>;
 
@@ -56,7 +60,7 @@ struct ConfigOptions {
 	bool                   hdr_enabled                 = false;
 	bool                   hide_cursor_enabled         = false;
 	bool                   splash_enabled              = true;
-	bool                   vr_enabled                  = false;
+	VrMode                 vr_mode                     = VrMode::Off;
 	bool                   amd_cpu_enabled             = false;
 	bool                   network_connected           = false;
 	uint32_t               vblank_frequency            = 60;
@@ -104,6 +108,7 @@ int32_t GetGpuIndex();
 bool     FullscreenEnabled();
 bool     HdrEnabled();
 bool     HideCursorEnabled();
+VrMode   GetVrMode();
 bool     VrEnabled();
 bool     AmdCpuEnabled();
 bool     IsNetworkConnected();

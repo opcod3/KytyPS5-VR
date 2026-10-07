@@ -19,6 +19,7 @@
 #include "graphics/presentation/videoOut.h"
 #include "graphics/presentation/window.h"
 #include "graphics/presentation/window/windowInternal.h"
+#include "graphics/presentation/xr/xrRuntime.h"
 #include "kernel/memory.h"
 #include "libs/controller.h"
 #include "loader/systemContent.h"
@@ -148,6 +149,7 @@ static uint32_t VulkanFindQueueFamily(vk::PhysicalDevice device, vk::SurfaceKHR 
 // On failure out_device is null and out_rejections says why each device was skipped.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 static void VulkanFindPhysicalDevice(vk::Instance instance, vk::SurfaceKHR surface,
+                                     vk::PhysicalDevice              required_device,
                                      const std::vector<const char*>& device_extensions,
                                      SurfaceCapabilities&            out_capabilities,
                                      vk::PhysicalDevice& out_device, uint32_t& out_queue_family,
@@ -161,7 +163,14 @@ static void VulkanFindPhysicalDevice(vk::Instance instance, vk::SurfaceKHR surfa
 	    });
 	EXIT_NOT_IMPLEMENTED(devices.empty());
 
-	if (Config::GetGpuIndex() >= 0) {
+	if (required_device != nullptr) {
+		// The OpenXR runtime renders on this device, so no other device can be used.
+		if (Config::GetGpuIndex() >= 0) {
+			LOGF("Vulkan GPU index %d is ignored; the OpenXR runtime selects the device\n",
+			     Config::GetGpuIndex());
+		}
+		devices = {required_device};
+	} else if (Config::GetGpuIndex() >= 0) {
 		if (static_cast<size_t>(Config::GetGpuIndex()) < devices.size()) {
 			devices = {devices[Config::GetGpuIndex()]};
 		} else {
@@ -660,7 +669,8 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 
 	vk::Device device = nullptr;
 
-	auto result = physical_device.createDevice(&create_info, nullptr, &device);
+	auto result = Xr::IsActive() ? Xr::CreateVulkanDevice(physical_device, create_info, &device)
+	                             : physical_device.createDevice(&create_info, nullptr, &device);
 	if (result != vk::Result::eSuccess) {
 		LOGF("vkCreateDevice failed: %s\n", vk::to_string(result).c_str());
 		return nullptr;
@@ -929,7 +939,21 @@ void WindowContext::CreateVulkan() {
 	inst_info.ppEnabledLayerNames =
 	    (r.enable_validation_layers ? r.required_layers.data() : nullptr);
 
-	const vk::Result result = vk::createInstance(&inst_info, nullptr, &graphic_ctx.instance);
+	vk::Result result = vk::Result::eErrorInitializationFailed;
+	if (Xr::IsActive()) {
+		result = Xr::CreateVulkanInstance(inst_info, &graphic_ctx.instance);
+		if (result != vk::Result::eSuccess) {
+			Log::WriteToConsoleAndLog(
+			    fmt::format("OpenXR could not create the Vulkan instance ({}); using the virtual "
+			                "headset\n",
+			                vk::to_string(result)));
+			Xr::Shutdown();
+			CreateVrWindow();
+		}
+	}
+	if (!Xr::IsActive()) {
+		result = vk::createInstance(&inst_info, nullptr, &graphic_ctx.instance);
+	}
 	switch (result) {
 		case vk::Result::eSuccess: break;
 		case vk::Result::eErrorIncompatibleDriver:
@@ -976,13 +1000,23 @@ void WindowContext::CreateVulkan() {
 	}
 #endif
 
+	vk::PhysicalDevice xr_device = nullptr;
+	if (Xr::IsActive()) {
+		xr_device = Xr::GetVulkanPhysicalDevice(graphic_ctx.instance);
+		if (xr_device == nullptr) {
+			EXIT("The OpenXR runtime did not name a Vulkan device\n");
+		}
+	}
+
 	std::string rejected_devices;
-	VulkanFindPhysicalDevice(graphic_ctx.instance, surface, device_extensions, surface_capabilities,
-	                         graphic_ctx.physical_device, graphic_ctx.queue_family,
-	                         rejected_devices);
+	VulkanFindPhysicalDevice(graphic_ctx.instance, surface, xr_device, device_extensions,
+	                         surface_capabilities, graphic_ctx.physical_device,
+	                         graphic_ctx.queue_family, rejected_devices);
 
 	if (graphic_ctx.physical_device == nullptr) {
-		EXIT("Could not find suitable device:%s", rejected_devices.c_str());
+		EXIT("Could not find suitable device%s:%s",
+		     xr_device != nullptr ? " (the OpenXR runtime requires this one)" : "",
+		     rejected_devices.c_str());
 	}
 
 	vk::PhysicalDevicePushDescriptorProperties push_descriptor_properties {};
@@ -1063,6 +1097,9 @@ void WindowContext::CreateVulkan() {
 		}
 	}
 	presenter = std::make_unique<Presenter>(*this);
+	if (Xr::IsActive()) {
+		Xr::StartSession(&graphic_ctx);
+	}
 }
 
 void WindowContext::RefreshSurfaceCapabilities() {
@@ -1108,6 +1145,8 @@ WindowContext::~WindowContext() {
 	presenter.reset();
 	LibKernel::Memory::InstallGpuResources(nullptr);
 	render_context.reset();
+	// The session uses the device and queue.
+	Xr::StopSession();
 
 	if (graphic_ctx.device != nullptr) {
 		RequireVulkanSuccess(graphic_ctx.device.waitIdle(), "wait for Vulkan device shutdown");
@@ -1136,6 +1175,7 @@ WindowContext::~WindowContext() {
 		graphic_ctx.instance        = nullptr;
 		graphic_ctx.physical_device = nullptr;
 	}
+	Xr::Shutdown();
 	if (window != nullptr) {
 		SDL_DestroyWindow(window);
 		window = nullptr;

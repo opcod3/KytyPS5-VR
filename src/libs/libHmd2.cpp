@@ -1,6 +1,7 @@
 #include "common/assert.h"
 #include "common/emulatorConfig.h"
 #include "graphics/guest_gpu/tile.h"
+#include "graphics/presentation/xr/xrRuntime.h"
 #include "kernel/pthread.h"
 #include "libs/agc.h"
 #include "libs/errno.h"
@@ -10,6 +11,7 @@
 
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -257,7 +259,16 @@ static int32_t KYTY_SYSV_ABI Hmd2Initialize(const SceHmd2InitializeParam* param)
 
 static void FillDeviceInformation(SceHmd2DeviceInformation* info) {
 	*info = {};
-	if (Config::VrEnabled()) {
+	if (Graphics::Xr::IsActive()) {
+		info->status   = Graphics::Xr::IsHeadsetReady() ? 0 : 1; // READY : NOT_READY
+		info->hmuMount = Graphics::Xr::IsUserPresent() ? 1 : 0;
+		float separation = 0.063f;
+		(void)Graphics::Xr::GetEyeSeparation(&separation);
+		info->lensSeparationDistance = static_cast<uint8_t>(std::lround(separation * 1000.0f));
+		// Games size their render targets for the PSVR2 panel; the runtime resamples it.
+		info->deviceInfo.panelResolution = {PANEL_WIDTH, PANEL_HEIGHT};
+		info->virtualImageDistance       = 2.0f;
+	} else if (Config::VrEnabled()) {
 		// Virtual headset defaults: READY, MOUNT, 63 mm lens separation.
 		info->hmuMount               = 1;
 		info->lensSeparationDistance = 63;
@@ -285,6 +296,18 @@ static int32_t KYTY_SYSV_ABI Hmd2GetDeviceInformation(SceHmd2DeviceInformation* 
 	return OK;
 }
 
+// The host headset's field of view, once its first frame has located the views; until then, and
+// with the virtual headset, the ER15 one.
+static void GetFieldOfView(SceHmd2FieldOfView* fov) {
+	Graphics::Xr::EyeFov host {};
+	if (Graphics::Xr::IsActive() && Graphics::Xr::GetFieldOfView(&host)) {
+		*fov = {host.tan_out, host.tan_in, host.tan_top, host.tan_bottom};
+		return;
+	}
+	*fov = {DEFAULT_FIELD_OF_VIEW.tan_out, DEFAULT_FIELD_OF_VIEW.tan_in,
+	        DEFAULT_FIELD_OF_VIEW.tan_top, DEFAULT_FIELD_OF_VIEW.tan_bottom};
+}
+
 static int32_t KYTY_SYSV_ABI Hmd2GetFieldOfViewWithoutHandle(SceHmd2FieldOfView* fov) {
 	PRINT_NAME();
 	if (!g_initialized.load()) {
@@ -293,9 +316,7 @@ static int32_t KYTY_SYSV_ABI Hmd2GetFieldOfViewWithoutHandle(SceHmd2FieldOfView*
 	if (fov == nullptr) {
 		return ERROR_PARAMETER_NULL;
 	}
-	// Virtual ER15 field of view: 55/42.5/51.2/51.2 degrees.
-	// These tangents describe that geometry, not bit-exact firmware output.
-	*fov = {1.4281480312f, 0.9163311720f, 1.2437491417f, 1.2437491417f};
+	GetFieldOfView(fov);
 	LOGF("Hmd2: FOV tangents out=%f in=%f top=%f bottom=%f\n", fov->tanOut, fov->tanIn,
 	     fov->tanTop, fov->tanBottom);
 	return OK;
@@ -412,8 +433,7 @@ static int32_t KYTY_SYSV_ABI Hmd2GetFieldOfView([[maybe_unused]] int32_t handle,
 	if (fov == nullptr) {
 		return ERROR_PARAMETER_NULL;
 	}
-	// Same virtual ER15 field of view as the handle-less query.
-	*fov = {1.4281480312f, 0.9163311720f, 1.2437491417f, 1.2437491417f};
+	GetFieldOfView(fov);
 	LOGF("Hmd2: FOV (handle) tangents out=%f in=%f top=%f bottom=%f\n", fov->tanOut, fov->tanIn,
 	     fov->tanTop, fov->tanBottom);
 	return OK;
@@ -427,8 +447,24 @@ static int32_t KYTY_SYSV_ABI Hmd2ReprojectionGetPredictedDisplayTime(int64_t   f
 	if (timestamp == nullptr) {
 		return ERROR_PARAMETER_NULL;
 	}
+	if (Graphics::Xr::IsActive()) {
+		*timestamp = Graphics::Xr::GetPredictedDisplayTime(flip_arg);
+		return OK;
+	}
 	// No scan-out is emulated; predict one 120 Hz refresh ahead of now.
 	*timestamp = LibKernel::KernelGetProcessTime() + 1000000 / 120;
+	return OK;
+}
+
+// Binds flip_arg to the headset refresh it will be shown at. Polled every frame, so it does not
+// log.
+static int32_t KYTY_SYSV_ABI Hmd2ReprojectionBeginFrame(int64_t flip_arg) {
+	if (GetReprojectionState() == nullptr) {
+		return ERROR_REPROJECTION_NOT_INITIALIZED;
+	}
+	if (Graphics::Xr::IsActive()) {
+		(void)Graphics::Xr::BeginFrame(flip_arg);
+	}
 	return OK;
 }
 
@@ -463,6 +499,22 @@ static int32_t KYTY_SYSV_ABI Hmd2GazeGetResultForFoveatedRendering(
 	result->status        = GAZE_TRACKING_STATUS_ENABLE;
 	result->gazeDirection = GAZE_FORWARD;
 	return OK;
+}
+
+static RenderPose MakeRenderPose(const SceHmd2ReprojectionPoseData& data, bool head_locked) {
+	RenderPose pose {};
+	pose.position    = {data.position[0], data.position[1], data.position[2]};
+	pose.orientation = {data.orientation[0], data.orientation[1], data.orientation[2],
+	                    data.orientation[3]};
+	pose.flip_arg    = data.flipArg;
+	pose.head_locked = head_locked;
+	// An all-zero quaternion means the guest left the pose unset.
+	const float length = pose.orientation[0] * pose.orientation[0] +
+	                     pose.orientation[1] * pose.orientation[1] +
+	                     pose.orientation[2] * pose.orientation[2] +
+	                     pose.orientation[3] * pose.orientation[3];
+	pose.valid = length > 0.5f && length < 1.5f;
+	return pose;
 }
 
 static bool IsValidLayerBlend(uint32_t blend_type) {
@@ -500,6 +552,12 @@ static int32_t KYTY_SYSV_ABI Hmd2ReprojectionSetParam(int32_t index, int64_t fli
 			case LAYER_TYPE_VR3D:
 				layer.blend_type = setting.data.vr3d.blendType;
 				layer.viewport   = {setting.data.vr3d.viewportL, setting.data.vr3d.viewportR};
+				for (uint32_t eye = 0; eye < 2; eye++) {
+					const auto& fov = eye == 0 ? setting.data.vr3d.fovL : setting.data.vr3d.fovR;
+					layer.fov[eye]  = {fov.tanOut, fov.tanIn, fov.tanTop, fov.tanBottom};
+				}
+				layer.pose = MakeRenderPose(setting.data.vr3d.pose,
+				                            setting.data.vr3d.disableReprojection);
 				break;
 			case LAYER_TYPE_UI2D:
 				layer.blend_type = setting.data.ui2d.blendType;
@@ -552,6 +610,7 @@ LIB_DEFINE(InitHmd2_1) {
 	LIB_FUNC("lAoFUedcfqA", Hmd2::Hmd2GazeGetResult);                        // sceHmd2GazeGetResult
 	LIB_FUNC("retc+-uRMhk", Hmd2::Hmd2GazeGetResultForFoveatedRendering);    // sceHmd2GazeGetResultForFoveatedRendering
 	LIB_FUNC("xMo9ENEu2E0", Hmd2::Hmd2ReprojectionSetParam);                 // sceHmd2ReprojectionSetParam
+	LIB_FUNC("Ocf081WpBpA", Hmd2::Hmd2ReprojectionBeginFrame);               // sceHmd2ReprojectionBeginFrame
 
 	// Stubbed entry points (success return, no emulated effect).
 	LIB_FUNC("f3kPeoTZnIE", Hmd2::Hmd2Open);                                 // sceHmd2Open
@@ -569,7 +628,6 @@ LIB_DEFINE(InitHmd2_1) {
 	LIB_FUNC("64ERZWVFBTE", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionSetUserEventEnd
 	LIB_FUNC("rjAd4nCY4DM", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionClearUserEventEnd
 	LIB_FUNC("hA9LshbSkzw", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionSetRenderConfig
-	LIB_FUNC("Ocf081WpBpA", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionBeginFrame
 	LIB_FUNC("Qx7SkcgAzok", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionEnableMirroring
 	LIB_FUNC("asilo8VNGvg", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionDisableMirroring
 	LIB_FUNC("+seEJVlljr0", Hmd2::Hmd2Stub);  // sceHmd2ReprojectionSetMirroringOption

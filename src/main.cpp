@@ -65,7 +65,8 @@ static void PrintUsage() {
 	::printf(
 	    "  --hide-cursor                        Hide the cursor after 2 s idle. Default: off.\n");
 	::printf("  --no-splash                          Disable the startup splash screen.\n");
-	::printf("  --vr                                 Enable the virtual VR headset.\n");
+	::printf("  --vr                                 Same as --vr-mode virtual.\n");
+	::printf("  --vr-mode <off|virtual|openxr>       PSVR2 headset backend. Default: off.\n");
 	::printf("  --amd-cpu                            Apply AMD CPU instruction patches.\n");
 	::printf("  --vblank-frequency <num>             Virtual vblank frequency. Default: 60.\n");
 	::printf("  --console-language <0-29>            Console language. Default: 1 (English US).\n");
@@ -136,6 +137,19 @@ static bool ParseEnum(const std::string& value, E& out) {
 	}
 
 	out = enum_value.value();
+	return true;
+}
+
+static bool ParseVrMode(const std::string& value, Config::VrMode& out) {
+	if (Common::EqualNoCase(value, "off")) {
+		out = Config::VrMode::Off;
+	} else if (Common::EqualNoCase(value, "virtual")) {
+		out = Config::VrMode::Virtual;
+	} else if (Common::EqualNoCase(value, "openxr")) {
+		out = Config::VrMode::OpenXr;
+	} else {
+		return false;
+	}
 	return true;
 }
 
@@ -233,7 +247,7 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 		}
 
 		if (arg == "--vr") {
-			options.config.vr_enabled = true;
+			options.config.vr_mode = Config::VrMode::Virtual;
 			continue;
 		}
 
@@ -372,6 +386,11 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 		} else if (arg == "--present-mode") {
 			if (!ParseEnum(value, options.config.present_mode)) {
 				::printf("invalid present mode: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--vr-mode") {
+			if (!ParseVrMode(value, options.config.vr_mode)) {
+				::printf("invalid VR mode: %s\n", value.c_str());
 				return false;
 			}
 		} else if (arg == "--gpu") {

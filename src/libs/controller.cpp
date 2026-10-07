@@ -7,6 +7,7 @@
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
+#include "graphics/presentation/xr/xrRuntime.h"
 #include "kernel/pthread.h"
 #include "libs/dualSenseHaptics.h"
 #include "libs/errno.h"
@@ -1117,6 +1118,12 @@ int KYTY_SYSV_ABI PadResetOrientation(int handle) {
 	if (const auto error = PadCheckHandle(handle); error != OK) {
 		return error;
 	}
+	if (handle == PAD_HANDLE_VR_CONTROLLER_LEFT || handle == PAD_HANDLE_VR_CONTROLLER_RIGHT) {
+		Graphics::Xr::ResetControllerOrientation(handle == PAD_HANDLE_VR_CONTROLLER_LEFT
+		                                             ? Graphics::Xr::Hand::Left
+		                                             : Graphics::Xr::Hand::Right);
+		return OK;
+	}
 
 	g_controller->ResetOrientation();
 	return OK;
@@ -1219,11 +1226,28 @@ int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num) {
 	return ret_num;
 }
 
+// The Sense controllers vibrate through the OpenXR runtime; one motor per hand.
+static bool PadSetVrControllerVibration(int handle, const PadVibrationParam& param) {
+	if (handle != PAD_HANDLE_VR_CONTROLLER_LEFT && handle != PAD_HANDLE_VR_CONTROLLER_RIGHT) {
+		return false;
+	}
+	const auto hand = handle == PAD_HANDLE_VR_CONTROLLER_LEFT ? Graphics::Xr::Hand::Left
+	                                                          : Graphics::Xr::Hand::Right;
+	const auto motor = std::max(param.large_motor, param.small_motor);
+	Graphics::Xr::SetControllerVibration(
+	    hand, static_cast<float>(motor) / 255.0f *
+	              static_cast<float>(Config::GetControllerVibrationIntensity()) / 100.0f);
+	return true;
+}
+
 int KYTY_SYSV_ABI PadSetVibration(int handle, const PadVibrationParam* param) {
 	PRINT_NAME();
 
 	if (const auto error = PadCheckHandle(handle); error != OK) {
 		return error;
+	}
+	if (param != nullptr && PadSetVrControllerVibration(handle, *param)) {
+		return OK;
 	}
 	if (param == nullptr) {
 		return PAD_ERROR_INVALID_ARG;
@@ -1293,6 +1317,85 @@ int KYTY_SYSV_ABI PadGetTriggerEffectState(int handle, PadTriggerEffectStateInfo
 	return OK;
 }
 
+constexpr uint32_t PAD_BUTTON_INTERCEPTED = 0x80000000;
+
+// One Sense controller from the host runtime's controller in the same hand.
+static void PadReadXrController(int handle, PadVrControllerData* data) {
+	const bool left = handle == PAD_HANDLE_VR_CONTROLLER_LEFT;
+	Graphics::Xr::ControllerState state;
+	Graphics::Xr::ControllerState other;
+	(void)Graphics::Xr::GetControllerState(left ? Graphics::Xr::Hand::Left
+	                                            : Graphics::Xr::Hand::Right,
+	                                       &state);
+	(void)Graphics::Xr::GetControllerState(left ? Graphics::Xr::Hand::Right
+	                                            : Graphics::Xr::Hand::Left,
+	                                       &other);
+
+	const auto to_byte = [](float value) {
+		return static_cast<uint8_t>(std::lround(std::clamp(value, 0.0f, 1.0f) * 255.0f));
+	};
+	// Sticks span 0..255 with 128 at rest; up is 0.
+	const auto to_axis = [](float value) {
+		return static_cast<uint8_t>(std::lround((std::clamp(value, -1.0f, 1.0f) + 1.0f) * 127.5f));
+	};
+
+	std::memset(data, 0, sizeof(*data));
+	uint32_t buttons = 0;
+	uint32_t touches = 0;
+	const auto set = [left](uint32_t& bits, bool on, uint32_t left_bit, uint32_t right_bit) {
+		if (on) {
+			bits |= left ? left_bit : right_bit;
+		}
+	};
+	set(buttons, state.face_upper, PAD_BUTTON_TRIANGLE, PAD_BUTTON_CIRCLE);
+	set(buttons, state.face_lower, PAD_BUTTON_SQUARE, PAD_BUTTON_CROSS);
+	set(buttons, state.trigger > 0.5f, PAD_BUTTON_L2, PAD_BUTTON_R2);
+	set(buttons, state.grip > 0.5f, PAD_BUTTON_L1, PAD_BUTTON_R1);
+	set(buttons, state.stick_click, PAD_BUTTON_L3, PAD_BUTTON_R3);
+	// Touch bits share the button bit layout.
+	set(touches, state.face_upper_touch, PAD_BUTTON_TRIANGLE, PAD_BUTTON_CIRCLE);
+	set(touches, state.face_lower_touch, PAD_BUTTON_SQUARE, PAD_BUTTON_CROSS);
+	set(touches, state.trigger_touch, PAD_BUTTON_L2, PAD_BUTTON_R2);
+	set(touches, state.grip_touch, PAD_BUTTON_L1, PAD_BUTTON_R1);
+	set(touches, state.stick_touch, PAD_BUTTON_L3, PAD_BUTTON_R3);
+	// Options sits on the right Sense controller; Touch has its menu button on the left.
+	if (!left && (state.menu || other.menu)) {
+		buttons |= PAD_BUTTON_OPTIONS;
+	}
+	// The runtime's own UI holds the controllers.
+	if (!state.focused) {
+		buttons = PAD_BUTTON_INTERCEPTED;
+		touches = 0;
+	}
+
+	data->buttons                = buttons;
+	data->finger_touch_detection = touches;
+	data->stick_x                = to_axis(state.stick_x);
+	data->stick_y                = to_axis(-state.stick_y);
+	// Proximity is only known as touched or not. The analog sensors are l1, r1, l2, r2.
+	const uint8_t grip_touch    = state.grip_touch && state.focused ? 255 : 0;
+	const uint8_t trigger_touch = state.trigger_touch && state.focused ? 255 : 0;
+	if (left) {
+		data->analog_buttons_l2                = to_byte(state.trigger);
+		data->analog_finger_touch_detection[0] = grip_touch;
+		data->analog_finger_touch_detection[2] = trigger_touch;
+	} else {
+		data->analog_buttons_r2                = to_byte(state.trigger);
+		data->analog_finger_touch_detection[1] = grip_touch;
+		data->analog_finger_touch_detection[3] = trigger_touch;
+	}
+	for (int i = 0; i < 3; i++) {
+		data->acceleration[i]     = state.acceleration[i];
+		data->angular_velocity[i] = state.angular_velocity[i];
+	}
+	for (int i = 0; i < 4; i++) {
+		data->orientation[i] = state.orientation[i];
+	}
+	data->connected       = state.connected;
+	data->connected_count = static_cast<uint8_t>(state.connected_count);
+	data->timestamp       = state.timestamp;
+}
+
 int KYTY_SYSV_ABI PadVrControllerReadState(int handle, PadVrControllerData* data) {
 	if (handle != PAD_HANDLE_VR_CONTROLLER_LEFT && handle != PAD_HANDLE_VR_CONTROLLER_RIGHT) {
 		return PAD_ERROR_INVALID_HANDLE;
@@ -1302,6 +1405,10 @@ int KYTY_SYSV_ABI PadVrControllerReadState(int handle, PadVrControllerData* data
 	}
 	if (data == nullptr) {
 		return PAD_ERROR_INVALID_ARG;
+	}
+	if (Graphics::Xr::IsActive()) {
+		PadReadXrController(handle, data);
+		return OK;
 	}
 
 	int             connected_count = 0;

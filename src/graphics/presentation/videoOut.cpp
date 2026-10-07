@@ -695,6 +695,13 @@ static Graphics::Presenter::HmdComposition Hmd2Composition(const VideoOutBuffer&
 	composition.width       = Hmd2::PANEL_WIDTH;
 	composition.height      = Hmd2::PANEL_HEIGHT;
 	composition.layer_count = settings.count;
+	for (uint32_t eye = 0; eye < 2; eye++) {
+		const auto& fov     = settings.layers[0].fov[eye];
+		composition.fov[eye] = {fov.tan_out, fov.tan_in, fov.tan_top, fov.tan_bottom};
+	}
+	const auto& pose = settings.layers[0].pose;
+	composition.pose = {pose.position, pose.orientation, pose.flip_arg, pose.valid,
+	                    pose.head_locked};
 	for (uint32_t i = 0; i < settings.count; i++) {
 		const auto& setting = settings.layers[i];
 		if (setting.src_id >= sources.size()) {

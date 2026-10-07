@@ -80,8 +80,12 @@ bool HideCursorEnabled() {
 	return g_config->hide_cursor_enabled;
 }
 
+VrMode GetVrMode() {
+	return g_config->vr_mode;
+}
+
 bool VrEnabled() {
-	return g_config->vr_enabled;
+	return g_config->vr_mode != VrMode::Off;
 }
 
 bool AmdCpuEnabled() {

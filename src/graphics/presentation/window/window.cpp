@@ -20,6 +20,7 @@
 #include "graphics/presentation/systemOverlay.h"
 #include "graphics/presentation/window/hostInput.h"
 #include "graphics/presentation/window/windowInternal.h"
+#include "graphics/presentation/xr/xrRuntime.h"
 #include "kytyGitVersion.h"
 #include "libs/controller.h"
 #include "loader/systemContent.h"
@@ -865,20 +866,25 @@ static void WindowCreate(WindowContext& context) {
 	InitializeSystemOverlayInput(context.window);
 	context.UpdateIcon();
 
-	if (Config::VrEnabled()) {
-		// Stays hidden until the guest flips to the headset output.
-		auto vr_window    = std::make_unique<SecondaryWindow>();
-		vr_window->window = SDL_CreateWindow(
-		    KYTY_SDL_VR_WINDOW_CAPTION, KYTY_VR_WINDOW_WIDTH, KYTY_VR_WINDOW_HEIGHT,
-		    static_cast<SDL_WindowFlags>(SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE |
-			                             SDL_WINDOW_HIDDEN));
-		if (vr_window->window == nullptr) {
-			EXIT("%s\n", SDL_GetError());
-		}
-		vr_window->width  = KYTY_VR_WINDOW_WIDTH;
-		vr_window->height = KYTY_VR_WINDOW_HEIGHT;
-		context.vr_window = std::move(vr_window);
+	// With OpenXR the runtime displays the headset output.
+	if (Config::VrEnabled() && !Xr::IsActive()) {
+		context.CreateVrWindow();
 	}
+}
+
+void WindowContext::CreateVrWindow() {
+	EXIT_IF(vr_window != nullptr);
+	// Stays hidden until the guest flips to the headset output.
+	auto secondary    = std::make_unique<SecondaryWindow>();
+	secondary->window = SDL_CreateWindow(
+	    KYTY_SDL_VR_WINDOW_CAPTION, KYTY_VR_WINDOW_WIDTH, KYTY_VR_WINDOW_HEIGHT,
+	    static_cast<SDL_WindowFlags>(SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN));
+	if (secondary->window == nullptr) {
+		EXIT("%s\n", SDL_GetError());
+	}
+	secondary->width  = KYTY_VR_WINDOW_WIDTH;
+	secondary->height = KYTY_VR_WINDOW_HEIGHT;
+	vr_window         = std::move(secondary);
 }
 
 uint32_t WindowContext::InitialWindowFlags(bool fullscreen) noexcept {
@@ -898,6 +904,10 @@ Presenter& WindowInit(uint32_t width, uint32_t height) {
 	window->graphic_ctx.screen_width  = width;
 	window->graphic_ctx.screen_height = height;
 
+	// OpenXR decides whether the headset gets a desktop window, and must exist before Vulkan.
+	if (Config::GetVrMode() == Config::VrMode::OpenXr && !Xr::Initialize()) {
+		Log::WriteToConsoleAndLog("OpenXR is unavailable; using the virtual headset\n");
+	}
 	WindowCreate(*window);
 	window->CreateVulkan();
 	auto& presenter = *window->presenter;

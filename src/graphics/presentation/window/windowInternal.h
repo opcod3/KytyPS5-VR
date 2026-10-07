@@ -57,6 +57,7 @@ struct WindowContext {
 	[[nodiscard]] static vk::PhysicalDeviceVulkan13Features RequiredVulkan13Features() noexcept;
 	[[nodiscard]] static uint32_t InitialWindowFlags(bool fullscreen) noexcept;
 	void                                                    CreateVulkan();
+	void                                                    CreateVrWindow();
 	void                                                    RecreateSurface();
 	void                                                    RefreshSurfaceCapabilities();
 	void                                                    UpdateIcon();
