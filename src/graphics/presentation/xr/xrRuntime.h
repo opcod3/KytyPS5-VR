@@ -104,6 +104,15 @@ struct ControllerState {
 	uint64_t timestamp = 0;
 };
 
+// Vibration of a Sense trigger's motor arm by how far the trigger is pulled: amplitude 0..1 at
+// each of ten positions from released (0) to fully pulled (9), and frequency in Hz (0 leaves it
+// to the runtime). OpenXR controllers have no adaptive triggers, so the controller's haptics
+// play it while the trigger is at a vibrating position.
+struct TriggerVibration {
+	std::array<float, 10> amplitude {};
+	float                 frequency = 0.0f;
+};
+
 struct PlayAreaBounds {
 	// The STAGE origin in the current coordinate system; the area is centred on it.
 	Pose  origin;
@@ -181,6 +190,9 @@ bool LocateController(Hand hand, uint64_t time, Location* location);
 void ResetControllerOrientation(Hand hand);
 // Vibration strength 0..1, held until changed; 0 stops it.
 void SetControllerVibration(Hand hand, float amplitude);
+// Held until changed; all-zero amplitudes stop it. The stronger of this and the controller
+// vibration plays.
+void SetTriggerVibration(Hand hand, const TriggerVibration& vibration);
 
 // Records a copy of a side-by-side headset panel (left eye in the left half) into the image the
 // frame thread shows. The source must be in TRANSFER_SRC_OPTIMAL layout, and its contents

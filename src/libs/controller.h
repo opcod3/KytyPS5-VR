@@ -61,6 +61,7 @@ struct PadTriggerEffectParam;
 struct PadTriggerEffectStateInformation {
 	int32_t state[2];
 };
+struct PadTriggerEffectCommand;
 struct PadVrControllerData;
 
 inline int controller_get_axis(int min, int max, int value) {
@@ -108,6 +109,9 @@ int KYTY_SYSV_ABI PadGetTriggerEffectState(int handle, PadTriggerEffectStateInfo
 int KYTY_SYSV_ABI PadResetLightBar(int handle);
 int KYTY_SYSV_ABI PadSetLightBar(int handle, const PadLightBarParam* param);
 int KYTY_SYSV_ABI PadVrControllerReadState(int handle, PadVrControllerData* data);
+int KYTY_SYSV_ABI PadVrControllerSetTriggerEffect(int handle, const PadTriggerEffectCommand* command);
+int KYTY_SYSV_ABI PadVrControllerSetTriggerEffects(int left_handle, int right_handle,
+                                                   const PadTriggerEffectParam* param);
 
 } // namespace Libs::Controller
 

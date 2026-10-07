@@ -796,6 +796,12 @@ void SetControllerVibration(Hand hand, float amplitude) {
 	}
 }
 
+void SetTriggerVibration(Hand hand, const TriggerVibration& vibration) {
+	if (g_runtime != nullptr && g_runtime->GetInput() != nullptr) {
+		g_runtime->GetInput()->SetTriggerVibration(hand, vibration);
+	}
+}
+
 void RecordPanelCopy(vk::CommandBuffer command, vk::Image source, vk::Format format,
                      vk::Extent2D extent, const PanelView& view) {
 	EXIT_IF(g_runtime == nullptr);
@@ -935,6 +941,8 @@ bool LocateController(Hand /*hand*/, uint64_t /*time*/, Location* /*location*/) 
 void ResetControllerOrientation(Hand /*hand*/) {}
 
 void SetControllerVibration(Hand /*hand*/, float /*amplitude*/) {}
+
+void SetTriggerVibration(Hand /*hand*/, const TriggerVibration& /*vibration*/) {}
 
 void RecordPanelCopy(vk::CommandBuffer /*command*/, vk::Image /*source*/, vk::Format /*format*/,
                      vk::Extent2D /*extent*/, const PanelView& /*view*/) {

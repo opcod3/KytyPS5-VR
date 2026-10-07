@@ -421,6 +421,56 @@ static int32_t TriggerEffectState(const PadTriggerEffectCommand& command, int va
 	}
 }
 
+constexpr uint8_t VR_TRIGGER_EFFECT_MASK_LEFT  = 0x01;
+constexpr uint8_t VR_TRIGGER_EFFECT_MASK_RIGHT = 0x02;
+
+// The haptics a Sense trigger effect asks for. The other modes push back on the finger, which
+// OpenXR controllers cannot do, so they give none. False for an invalid command.
+static bool trigger_effect_to_vibration(const PadTriggerEffectCommand& command,
+                                        Graphics::Xr::TriggerVibration*  vibration) {
+	// The DualSense conversion validates every mode the same way scePadSetTriggerEffect does.
+	uint8_t effect[11];
+	if (!trigger_effect_to_dualsense(command, effect, 1.0f)) {
+		return false;
+	}
+	*vibration = {};
+	switch (command.mode) {
+		case 3: {
+			const auto position  = command.data[0];
+			const auto amplitude = command.data[1];
+			const auto frequency = command.data[2];
+			if (frequency != 0) {
+				std::fill(vibration->amplitude.begin() + position, vibration->amplitude.end(),
+				          static_cast<float>(amplitude) / 8.0f);
+				vibration->frequency = frequency;
+			}
+			return true;
+		}
+		case 6: {
+			const auto frequency = command.data[0];
+			if (frequency != 0) {
+				for (size_t i = 0; i < vibration->amplitude.size(); i++) {
+					vibration->amplitude[i] = static_cast<float>(command.data[1 + i]) / 8.0f;
+				}
+				vibration->frequency = frequency;
+			}
+			return true;
+		}
+		default: return true;
+	}
+}
+
+static Graphics::Xr::Hand VrControllerHand(int handle) {
+	return handle == PAD_HANDLE_VR_CONTROLLER_LEFT ? Graphics::Xr::Hand::Left
+	                                               : Graphics::Xr::Hand::Right;
+}
+
+static void SetVrTriggerVibration(int handle, const Graphics::Xr::TriggerVibration& vibration) {
+	if (Graphics::Xr::IsActive()) {
+		Graphics::Xr::SetTriggerVibration(VrControllerHand(handle), vibration);
+	}
+}
+
 void Initialize() {
 	EXIT_IF(g_controller != nullptr);
 
@@ -1314,6 +1364,49 @@ int KYTY_SYSV_ABI PadGetTriggerEffectState(int handle, PadTriggerEffectStateInfo
 
 	g_controller->GetTriggerEffectState(info);
 
+	return OK;
+}
+
+int KYTY_SYSV_ABI PadVrControllerSetTriggerEffect(int handle, const PadTriggerEffectCommand* command) {
+	PRINT_NAME();
+
+	if (handle != PAD_HANDLE_VR_CONTROLLER_LEFT && handle != PAD_HANDLE_VR_CONTROLLER_RIGHT) {
+		return PAD_ERROR_INVALID_HANDLE;
+	}
+	Graphics::Xr::TriggerVibration vibration;
+	if (command == nullptr || !trigger_effect_to_vibration(*command, &vibration)) {
+		return PAD_ERROR_INVALID_ARG;
+	}
+	SetVrTriggerVibration(handle, vibration);
+	return OK;
+}
+
+int KYTY_SYSV_ABI PadVrControllerSetTriggerEffects(int left_handle, int right_handle,
+                                                   const PadTriggerEffectParam* param) {
+	PRINT_NAME();
+
+	if (left_handle != PAD_HANDLE_VR_CONTROLLER_LEFT ||
+	    right_handle != PAD_HANDLE_VR_CONTROLLER_RIGHT) {
+		return PAD_ERROR_INVALID_HANDLE;
+	}
+	if (param == nullptr) {
+		return PAD_ERROR_INVALID_ARG;
+	}
+	// command[0] is the left controller's trigger, command[1] the right one's.
+	constexpr std::array<uint8_t, 2> masks {VR_TRIGGER_EFFECT_MASK_LEFT,
+	                                        VR_TRIGGER_EFFECT_MASK_RIGHT};
+	std::array<Graphics::Xr::TriggerVibration, 2> vibrations;
+	for (size_t i = 0; i < 2; i++) {
+		if ((param->trigger_mask & masks[i]) != 0 &&
+		    !trigger_effect_to_vibration(param->command[i], &vibrations[i])) {
+			return PAD_ERROR_INVALID_ARG;
+		}
+	}
+	for (size_t i = 0; i < 2; i++) {
+		if ((param->trigger_mask & masks[i]) != 0) {
+			SetVrTriggerVibration(i == 0 ? left_handle : right_handle, vibrations[i]);
+		}
+	}
 	return OK;
 }
 

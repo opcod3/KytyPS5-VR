@@ -5,6 +5,8 @@
 #include "common/assert.h"
 #include "common/logging/log.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -348,7 +350,19 @@ void Input::SyncHand(HandData& hand, XrTime time, XrSpace world, bool focused) {
 }
 
 void Input::ApplyHaptics(HandData& hand, XrTime time) {
-	const float amplitude = hand.vibration.load();
+	float amplitude = hand.vibration.load();
+	float frequency = XR_FREQUENCY_UNSPECIFIED;
+	{
+		Common::LockGuard lock(m_mutex);
+		const auto& trigger  = hand.trigger_vibration;
+		const auto  position = std::clamp(
+		    static_cast<int>(std::lround(hand.state.trigger * 9.0f)), 0,
+		    static_cast<int>(trigger.amplitude.size()) - 1);
+		if (trigger.amplitude[position] > amplitude) {
+			amplitude = trigger.amplitude[position];
+			frequency = trigger.frequency > 0.0f ? trigger.frequency : XR_FREQUENCY_UNSPECIFIED;
+		}
+	}
 	XrHapticActionInfo info {XR_TYPE_HAPTIC_ACTION_INFO};
 	info.action        = m_actions.haptic;
 	info.subactionPath = hand.path;
@@ -359,19 +373,21 @@ void Input::ApplyHaptics(HandData& hand, XrTime time) {
 		}
 		return;
 	}
-	if (amplitude == hand.applied && time - hand.applied_time < HAPTIC_RENEWAL) {
+	if (amplitude == hand.applied && frequency == hand.applied_frequency &&
+	    time - hand.applied_time < HAPTIC_RENEWAL) {
 		return;
 	}
 	XrHapticVibration vibration {XR_TYPE_HAPTIC_VIBRATION};
 	vibration.duration  = HAPTIC_PULSE;
-	vibration.frequency = XR_FREQUENCY_UNSPECIFIED;
+	vibration.frequency = frequency;
 	vibration.amplitude = amplitude;
 	(void)m_runtime.Check(
 	    xrApplyHapticFeedback(m_session, &info,
 	                          reinterpret_cast<const XrHapticBaseHeader*>(&vibration)),
 	    "xrApplyHapticFeedback");
-	hand.applied      = amplitude;
-	hand.applied_time = time;
+	hand.applied           = amplitude;
+	hand.applied_frequency = frequency;
+	hand.applied_time      = time;
 }
 
 bool Input::GetState(Hand hand, ControllerState* state) {
@@ -389,6 +405,11 @@ void Input::ResetOrientation(Hand hand) {
 
 void Input::SetVibration(Hand hand, float amplitude) {
 	m_hands[static_cast<int>(hand)].vibration = amplitude;
+}
+
+void Input::SetTriggerVibration(Hand hand, const TriggerVibration& vibration) {
+	Common::LockGuard lock(m_mutex);
+	m_hands[static_cast<int>(hand)].trigger_vibration = vibration;
 }
 
 } // namespace Libs::Graphics::Xr

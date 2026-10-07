@@ -51,6 +51,10 @@ What `--vr-mode openxr` does today:
 - **Controllers** (`xr/xrInput.cpp`). Action set `psvr2` bound for Touch, Index, WMR, Vive and
   `khr/simple_controller`. `scePadVrControllerReadState`, `GetDeviceInformation`,
   `scePadSetVibration` and `scePadResetOrientation` on the Sense handles use it.
+  `scePadVrControllerSetTriggerEffect[s]` play the `VIBRATION` and `MULTIPLE_POSITION_VIBRATION`
+  modes as controller haptics while the trigger is pulled to a vibrating position
+  (`Xr::SetTriggerVibration`); the stronger of that and `scePadSetVibration` wins. Feedback modes
+  have no OpenXR equivalent and only validate.
 
 Deliberate deviations from the plan below:
 
@@ -688,10 +692,8 @@ In rough order of value:
 3. **Gaze** via `XR_EXT_eye_gaze_interaction` (enabled when present; nothing reads it yet).
 4. **`scePadVrControllerRead` / `ReadCombinedState`.** NIDs still need computing; build them from
    `Input`'s cached state.
-5. **Trigger effects** on the Sense controllers (`scePadVrControllerSetTriggerEffects` only logs);
-   map the vibration modes to `Xr::SetControllerVibration`.
-6. **Windows** time conversion (`XR_KHR_win32_convert_performance_counter_time`), then remove the
+5. **Windows** time conversion (`XR_KHR_win32_convert_performance_counter_time`), then remove the
    refusal in `Runtime::CreateInstance`.
-7. **Untested:** SteamVR (§10), real hardware, a runtime without `LOCAL_FLOOR`
+6. **Untested:** trigger-effect haptics (Monado's Qwerty controllers ignore haptics), SteamVR (§10), real hardware, a runtime without `LOCAL_FLOOR`
    (the 1.6 m fallback in `CreateOffsetSpace`), recentre in a game, and play-area queries on a
    runtime that reports bounds.

@@ -35,6 +35,7 @@ public:
 	bool    GetState(Hand hand, ControllerState* state);
 	void    ResetOrientation(Hand hand);
 	void    SetVibration(Hand hand, float amplitude);
+	void    SetTriggerVibration(Hand hand, const TriggerVibration& vibration);
 	XrSpace GetGripSpace(Hand hand) const { return m_hands[static_cast<int>(hand)].grip_space; }
 
 private:
@@ -68,7 +69,9 @@ private:
 
 		// Haptics as last applied by the frame thread.
 		std::atomic<float> vibration = 0.0f;
+		TriggerVibration   trigger_vibration;
 		float              applied   = 0.0f;
+		float              applied_frequency = XR_FREQUENCY_UNSPECIFIED;
 		XrTime             applied_time = 0;
 
 		ControllerState state;

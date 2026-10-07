@@ -229,18 +229,6 @@ static int KYTY_SYSV_ABI PadVrControllerGetTriggerEffectState(
 	return OK;
 }
 
-static int KYTY_SYSV_ABI PadVrControllerSetTriggerEffects(int left_handle, int right_handle,
-                                                          const void* param) {
-	PRINT_NAME();
-
-	LOGF("\t left_handle  = %d\n"
-	     "\t right_handle = %d\n"
-	     "\t param        = 0x%016" PRIx64 "\n",
-	     left_handle, right_handle, reinterpret_cast<uint64_t>(param));
-
-	return OK;
-}
-
 LIB_DEFINE(InitPad_1) {
 	PRINT_NAME_ENABLE(true);
 
@@ -271,7 +259,8 @@ LIB_DEFINE(InitPad_1) {
 	LIB_FUNC("iA-DdobUen8", Controller::PadVrControllerReadState);
 	LIB_FUNC("mbJHDdjhVeY", PadVrControllerGetDeviceInformation);
 	LIB_FUNC("OL2CJ2idmhk", PadVrControllerGetTriggerEffectState);
-	LIB_FUNC("v8P+9PRqg10", PadVrControllerSetTriggerEffects);
+	LIB_FUNC("v8P+9PRqg10", Controller::PadVrControllerSetTriggerEffects);
+	LIB_FUNC("6Cdc9bbjrRY", Controller::PadVrControllerSetTriggerEffect);
 }
 
 namespace LibMouse {
