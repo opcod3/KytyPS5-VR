@@ -200,6 +200,7 @@ private:
 	void                      BindImage(ImageId id, bool storage);
 	void                      BindRenderTarget(ImageId id);
 	void                      ResetBindings();
+	void CheckSpecializationReads(std::span<PreparedBindings* const> prepared_bindings);
 	[[nodiscard]] bool        TryConsumeComputeMetaClear(const ShaderComputeInputInfo& input,
 	                                                     const CommandBuffer&          buffer);
 	[[nodiscard]] bool TryConsumeComputeImageClear(const ShaderComputeInputInfo& input,
@@ -212,6 +213,8 @@ private:
 	std::vector<ImageId>                  m_bound_images;
 	std::vector<vk::DescriptorImageInfo>  m_descriptor_images;
 	std::vector<vk::WriteDescriptorSet>   m_descriptor_writes;
+	// Scratch for CheckSpecializationReads: merged [begin, end) read intervals.
+	std::vector<std::pair<uint64_t, uint64_t>> m_specialization_read_ranges;
 
 	friend class CommandProcessor;
 	friend struct RenderExecutorTestAccess;
