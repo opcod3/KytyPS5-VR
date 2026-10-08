@@ -423,14 +423,14 @@ void Visit(Program& program, ShaderStageInputInfo input_info, InputUsage& inputs
 			const auto component = inst.Arg(1).U32();
 			switch (kind) {
 				case StageInputKind::PackedAncillary: {
-					// A stereo-expansion variant keeps the packed ancillary live to read the
-					// eye bit, supplied from PushData::StereoEyeDword at draw time (see
-					// EmitBuiltinU32). Every other configuration fully decomposes it, so a
-					// live use is otherwise unsupported.
-					if (ShaderIsStereoVariant(program.stage, input_info)) {
-						break;
+					// The packed ancillary is emulated as the eye bit alone (see
+					// EmitBuiltinU32): a stereo-expansion variant supplies it from
+					// PushData::StereoEyeDword, a mono shader reads eye 0. Recognized
+					// SampleId/Layer field reads were already lowered to their own builtins.
+					if (program.stage != ShaderType::Pixel || component != 0u) {
+						return Fail("packed pixel ancillary input is invalid");
 					}
-					return Fail("packed pixel ancillary input has an unsupported live use");
+					break;
 				}
 				case StageInputKind::Layer:
 				case StageInputKind::SampleId:

@@ -34,6 +34,7 @@ uint32_t EmitBuiltinU32(EmitterState& state, IR::StageInputKind kind, uint32_t c
 	if (kind == IR::StageInputKind::LocalInvocationIndex) {
 		return EmitLocalInvocationIndex(state);
 	}
+	// A mono shader has no ancillary input variable, so its packed ancillary reads 0 (eye 0) below.
 	if (kind == IR::StageInputKind::PackedAncillary && state.program.bindings.uses_stereo_eye) {
 		// One stereo variant serves both eyes: supply ancillary bit 7 from the pushed eye index
 		// instead of the (emulated) hardware ancillary register, which never carries it.
