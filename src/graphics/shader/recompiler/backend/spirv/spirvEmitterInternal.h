@@ -117,6 +117,9 @@ struct EmitterState {
 	uint32_t                                         gds_variable            = 0;
 	uint32_t                                         gds_length              = 0;
 	uint32_t                                         push_constant_variable  = 0;
+	// The stereo right-eye X, kept so the position and MISC exports combine in either order.
+	uint32_t                                         stereo_right_x_variable = 0;
+	uint32_t                                         stereo_right_x_written_variable = 0;
 	uint32_t                                         shader_data_storage_variable = 0;
 	uint32_t                                         flattened_srt_variable  = 0;
 	spv::StorageClass                                lds_storage_class = spv::StorageClassFunction;
