@@ -246,8 +246,18 @@ struct PipelineCache::ProgramCache {
 		template <bool HasCalls>
 		Permutation* FindPermutation(const ShaderRecompiler::IR::SrtRuntime& runtime,
 		                             uint32_t push_data_cursor) {
-			EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
-			    resource_plan, runtime, resources, specialization));
+			{
+				KYTY_PROFILER_BLOCK("ProgramCache::MaterializeResources");
+				EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
+				    resource_plan, runtime, resources, specialization));
+				if (tracy::ProfilerAvailable()) {
+					TracyPlot("ProgramCache::SpecializationReads",
+					          static_cast<int64_t>(resources.specialization_reads.size()));
+					TracyPlot("ProgramCache::Permutations",
+					          static_cast<int64_t>(permutations.size()));
+				}
+			}
+			KYTY_PROFILER_BLOCK("ProgramCache::FindPermutation");
 			for (auto& candidate: permutations) {
 				const auto& layout = candidate.program.bindings;
 				if (layout.push_data_start_dword != ShaderRecompiler::IR::PushData::StartFor(
@@ -335,8 +345,12 @@ struct PipelineCache::ProgramCache {
 		lookup_key.hash            = params.hash;
 		lookup_key.user_data_count = params.user_data_count;
 		lookup_key.code_size       = static_cast<uint32_t>(params.code.size());
-		BuildStageStaticKey(input_info, lookup_key.static_state);
-		auto                                         entry = programs.find(lookup_key);
+		auto entry = programs.end();
+		{
+			KYTY_PROFILER_BLOCK("ProgramCache::Lookup");
+			BuildStageStaticKey(input_info, lookup_key.static_state);
+			entry = programs.find(lookup_key);
+		}
 		ShaderRecompiler::IR::SrtRuntime             runtime {
 		    .user_data                  = user_data,
 		    .shader_base                = params.Base(),
@@ -382,6 +396,7 @@ struct PipelineCache::ProgramCache {
 			case ShaderType::Compute: label = "ShaderRecompiler CS"; stage_name = "cs"; break;
 			default: EXIT("invalid pipeline shader stage\n");
 		}
+		KYTY_PROFILER_BLOCK("ProgramCache::Compile");
 		ShaderRecompiler::CompileOptions options;
 		options.stage       = stage;
 		options.shader_hash = params.hash;
@@ -647,11 +662,13 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
     std::span<const Prospero::ColorComponentMapping, 8> target_export_mapping, bool pixel_active,
     std::array<ShaderVertexInputInfo, 3>& vertex_info, ShaderPixelInputInfo& pixel_info,
     bool stereo) {
+	KYTY_PROFILER_BLOCK("PipelineCache::GetGraphicsPrograms");
 	const bool tess_active = user_config.GetPrimType() == Prospero::PrimitiveType::kPatch;
 	std::array<ShaderParams, 3> vertex_params;
 	if (tess_active) {
 		vertex_params = PrepareTessellationPrograms(vertex_regs, context, vertex_info);
 	} else {
+		KYTY_PROFILER_BLOCK("PrepareProgram(Vertex)");
 		vertex_params[0] = PrepareProgram(vertex_regs, context, user_config, vertex_info[0]);
 	}
 	const bool mesh_active = vertex_info[0].logical_stage == ShaderType::Mesh;
@@ -675,7 +692,10 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 	}
 	ShaderParams pixel_params;
 	if (pixel_active) {
-		pixel_params      = PrepareProgram(pixel_regs, sh, target_export_mapping, pixel_info);
+		{
+			KYTY_PROFILER_BLOCK("PrepareProgram(Pixel)");
+			pixel_params = PrepareProgram(pixel_regs, sh, target_export_mapping, pixel_info);
+		}
 		if (!mesh_active && !tess_active && Prospero::IsRectList(user_config.GetPrimType())) {
 			pixel_info.parameter_mode = ShaderPixelParameterMode::Rectangle;
 		} else if (context.GetModeControl().provoking_vtx_last) {

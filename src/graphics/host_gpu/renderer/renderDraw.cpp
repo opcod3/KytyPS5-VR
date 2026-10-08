@@ -470,6 +470,7 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
                                                  uint32_t color_count, RenderDepthInfo& depth,
                                                  vk::ImageAspectFlags& feedback_aspects,
                                                  std::span<PreparedBindings* const> stages) {
+	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(colors == nullptr || color_count > RENDER_COLOR_ATTACHMENTS_MAX);
 	feedback_aspects = {};
 	auto&       cache = m_context.GetTextureCache();
@@ -692,6 +693,7 @@ struct PreparedVertexBuffers {
 
 static PreparedVertexBuffers AcquireVertexBuffers(CommandBuffer&               buffer,
                                                   const ShaderVertexInputInfo& vs_input_info) {
+	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(vs_input_info.buffers_num < 0 ||
 	        vs_input_info.buffers_num > ShaderVertexInputInfo::RES_MAX);
 
@@ -916,6 +918,7 @@ static bool StereoExpansionEnabled(const CommandBuffer& buffer) {
 bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCallInfo& draw,
                                             uint32_t            render_target_slice_offset,
 	                                        DrawRenderState& state) {
+	KYTY_PROFILER_FUNCTION();
 	const auto& shader_regs       = buffer.GetRegisters().GetShaderRegisters();
 	const auto  color_output_mask = DrawColorOutputMask(buffer.GetRegisters());
 	// One shared variant rasterizes both eyes when stereo expansion is on; the draw loop below
@@ -962,6 +965,7 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 
 static PreparedIndexBuffer PrepareIndexBuffer(CommandBuffer&               buffer,
                                               const DrawIndexBufferSource& source) {
+	KYTY_PROFILER_FUNCTION();
 	PreparedIndexBuffer prepared;
 	if (source.size == 0) {
 		return prepared;
@@ -1116,6 +1120,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
                                          vk::PrimitiveTopology topology, const DrawEmitInfo& emit,
                                          const DrawIndexBufferSource& index_source,
 	                                     bool primitive_restart_enable) {
+	KYTY_PROFILER_FUNCTION();
 	auto& ucfg = buffer.GetUserConfig();
 	if (CopyDepthToColor(buffer, draw, emit, state)) {
 		return;
@@ -1226,8 +1231,11 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x400u);
 	}
-	m_context.GetCommandScheduler().BeginRendering(rendering);
-	vk_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
+	{
+		KYTY_PROFILER_BLOCK("Draw::BeginRendering");
+		m_context.GetCommandScheduler().BeginRendering(rendering);
+		vk_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
+	}
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x500u);
 	}
@@ -1238,6 +1246,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	const uint32_t eye_count          = state.stereo ? 2u : 1u;
 	auto&          dynamic_state      = m_context.GetCommandScheduler().GetDynamicState();
 	for (uint32_t eye = 0; eye < eye_count; eye++) {
+		KYTY_PROFILER_BLOCK("Draw::EmitEye");
 		UpdateGraphicsDynamicState(buffer, dynamic_state, vertex_stages.back(), state.depth_info,
 		                           rendering, eye * viewport_id_offset);
 		dynamic_state.SetAttachmentFeedbackLoopAspects(feedback_aspects);
@@ -1270,6 +1279,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		shader_write_stages |= vk::PipelineStageFlagBits::eFragmentShader;
 	}
 	if (shader_write_stages) {
+		KYTY_PROFILER_BLOCK("Draw::ShaderWriteBarrier");
 		m_context.GetCommandScheduler().EndRendering();
 		ShaderWriteBarrier(vk_buffer, shader_write_stages);
 	}
@@ -1285,7 +1295,10 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 
 	EXIT_IF(buffer.IsInvalid());
 	EXIT_IF(args.offset_source == DrawOffsetSource::DrawState && args.first_instance != 0);
-	m_context.GetCommandScheduler().PopPendingOperations();
+	{
+		KYTY_PROFILER_BLOCK("Draw::PopPendingOperations");
+		m_context.GetCommandScheduler().PopPendingOperations();
+	}
 	auto& ucfg   = buffer.GetUserConfig();
 	auto& sh_ctx = buffer.GetShaders();
 
@@ -1293,14 +1306,23 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	                    args.index_count, 0, 1, args.instance_count,
 	                    reinterpret_cast<uint64_t>(args.index_addr));
 
-	Common::LockGuard lock(m_context.GetMutex());
+	std::optional<Common::LockGuard> lock;
+	{
+		KYTY_PROFILER_BLOCK("Draw::WaitRenderMutex");
+		lock.emplace(m_context.GetMutex());
+	}
 	if (args.index_count == 0 || args.instance_count == 0) {
 		return;
 	}
 
-	if (ConsumeMetadataColorOperation(buffer) || DepthStencilCopy(buffer) ||
-	    DepthColorCopy(buffer, args.render_target_slice_offset) ||
-	    ResolveColorTargets(buffer, args.render_target_slice_offset)) {
+	bool special_operation = false;
+	{
+		KYTY_PROFILER_BLOCK("Draw::SpecialOperations");
+		special_operation = ConsumeMetadataColorOperation(buffer) || DepthStencilCopy(buffer) ||
+		                    DepthColorCopy(buffer, args.render_target_slice_offset) ||
+		                    ResolveColorTargets(buffer, args.render_target_slice_offset);
+	}
+	if (special_operation) {
 		ResetBindings();
 		return;
 	}
@@ -1326,9 +1348,11 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 		     static_cast<uint32_t>(args.base_vertex), args.first_instance);
 	}
 
-	uc_check(ucfg);
-
-	hw_check(buffer);
+	{
+		KYTY_PROFILER_BLOCK("Draw::RegisterChecks");
+		uc_check(ucfg);
+		hw_check(buffer);
+	}
 
 	vk::PrimitiveTopology topology = vk::PrimitiveTopology::ePointList;
 	if (!GetDrawTopology(ucfg, topology)) {
@@ -1352,7 +1376,11 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 		default: EXIT("unknown index_type_and_size: %u\n", args.index_type_and_size);
 	}
 	index_source.size = static_cast<uint64_t>(args.index_count) * index_source.guest_element_size;
-	const bool primitive_restart = ResolvePrimitiveRestart(buffer, index_source);
+	bool primitive_restart = false;
+	{
+		KYTY_PROFILER_BLOCK("Draw::ResolvePrimitiveRestart");
+		primitive_restart = ResolvePrimitiveRestart(buffer, index_source);
+	}
 
 	std::vector<uint16_t> expanded_indices;
 	if (index_source.guest_element_size == 1) {
@@ -1400,7 +1428,10 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 
 	EXIT_IF(buffer.IsInvalid());
 	EXIT_IF(args.offset_source == DrawOffsetSource::DrawState && args.first_instance != 0);
-	m_context.GetCommandScheduler().PopPendingOperations();
+	{
+		KYTY_PROFILER_BLOCK("Draw::PopPendingOperations");
+		m_context.GetCommandScheduler().PopPendingOperations();
+	}
 	auto& ucfg   = buffer.GetUserConfig();
 	auto& sh_ctx = buffer.GetShaders();
 
@@ -1408,14 +1439,23 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 	                    args.vertex_count, 0, args.first_vertex, args.instance_count,
 	                    args.first_instance);
 
-	Common::LockGuard lock(m_context.GetMutex());
+	std::optional<Common::LockGuard> lock;
+	{
+		KYTY_PROFILER_BLOCK("Draw::WaitRenderMutex");
+		lock.emplace(m_context.GetMutex());
+	}
 	if (args.vertex_count == 0 || args.instance_count == 0) {
 		return;
 	}
 
-	if (ConsumeMetadataColorOperation(buffer) || DepthStencilCopy(buffer) ||
-	    DepthColorCopy(buffer, args.render_target_slice_offset) ||
-	    ResolveColorTargets(buffer, args.render_target_slice_offset)) {
+	bool special_operation = false;
+	{
+		KYTY_PROFILER_BLOCK("Draw::SpecialOperations");
+		special_operation = ConsumeMetadataColorOperation(buffer) || DepthStencilCopy(buffer) ||
+		                    DepthColorCopy(buffer, args.render_target_slice_offset) ||
+		                    ResolveColorTargets(buffer, args.render_target_slice_offset);
+	}
+	if (special_operation) {
 		ResetBindings();
 		return;
 	}
@@ -1437,9 +1477,11 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 		     args.vertex_count, args.instance_count, args.first_vertex, args.first_instance);
 	}
 
-	uc_check(ucfg);
-
-	hw_check(buffer);
+	{
+		KYTY_PROFILER_BLOCK("Draw::RegisterChecks");
+		uc_check(ucfg);
+		hw_check(buffer);
+	}
 
 	const DrawCallInfo draw {CommandBufferDebugOp::DrawIndexAuto,
 	                         args.vertex_count, args.instance_count, args.first_instance};

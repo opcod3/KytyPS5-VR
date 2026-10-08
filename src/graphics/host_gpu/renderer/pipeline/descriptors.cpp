@@ -111,6 +111,7 @@ static bool IsMultisampledTexture(Prospero::ImageType type) {
 static vk::DescriptorBufferInfo
 NativeStorageBuffer(RenderContext& context, const PreparedBindings::BufferSource& source,
                     const ShaderRecompiler::IR::BufferResource& resource, uint32_t& buffer_offset) {
+	KYTY_PROFILER_FUNCTION();
 	buffer_offset = 0;
 
 	const auto& [address, size, id] = source;
@@ -504,6 +505,7 @@ static bool ResolveTextureMipView(ImageInfo& info, uint32_t physical_levels, boo
 
 TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageResource&   resource,
                                               const ShaderRecompiler::IR::DescriptorValue& value) {
+	KYTY_PROFILER_FUNCTION();
 	if (resource.atomic64 && !m_context.GetGraphics().shader_image_int64_atomics_enabled) {
 		EXIT("64-bit image atomics require shaderImageInt64Atomics\n");
 	}
@@ -676,6 +678,7 @@ static vk::Sampler NativeSampler(RenderContext&                       context,
 
 static vk::DescriptorBufferInfo NativeUpload(RenderContext&            context,
                                              std::span<const uint32_t> data) {
+	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(data.empty());
 	auto& command_buffer = context.GetCommandScheduler().Current();
 	EXIT_IF(command_buffer.IsInvalid());
@@ -704,6 +707,7 @@ void RenderExecutor::BindRenderTarget(ImageId id) {
 }
 
 void RenderExecutor::ResetBindings() {
+	KYTY_PROFILER_FUNCTION();
 	for (const auto id: m_bound_images) {
 		if (auto* image = m_context.GetTextureCache().m_slot_images.try_get(id); image != nullptr) {
 			image->binding = {};
@@ -879,6 +883,7 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 
 void RenderExecutor::PrepareGraphicsBindings(std::span<PreparedBindings* const> stages,
                                              std::span<RenderColorInfo> colors) {
+	KYTY_PROFILER_FUNCTION();
 	bool uses_dma = false;
 	FindBuffers(stages);
 	for (auto* stage: stages) {
@@ -951,6 +956,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 	for (const auto* reader: prepared_bindings) {
 		const auto& reads = reader->runtime->resources->specialization_reads;
 		if (reads.empty()) continue;
+		KYTY_PROFILER_BLOCK("CommitBindings::CheckSpecializationReads");
 		for (const auto* writer: prepared_bindings) {
 			if (writer->runtime->program->has_address_writes) {
 				EXIT("scalar resource reads cannot be proven disjoint from shader address writes\n");
@@ -1004,6 +1010,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 		}
 
 		for (uint32_t i = 0; i < program.info.images.size(); i++) {
+			KYTY_PROFILER_BLOCK("CommitBindings::TransitImage");
 			auto& image   = m_context.GetTextureCache().GetImage(descriptors.images[i].image_id);
 			auto& binding = descriptors.images[i];
 			const auto&                 view = binding.desc.view_info;
@@ -1055,6 +1062,7 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 		for (auto mask = program.bindings.descriptor_mask; mask != 0; mask &= mask - 1) {
 			const auto index = std::countr_zero(mask);
 			const auto kind = static_cast<BindingKind>(index);
+			KYTY_PROFILER_BLOCK("CommitBindings::BuildWrite");
 			vk::WriteDescriptorSet write {};
 			write.dstBinding = ShaderRecompiler::IR::NativeBinding(program.stage, kind);
 			write.descriptorType = NativeDescriptorType(kind);
@@ -1143,10 +1151,12 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 	if (!m_descriptor_writes.empty()) {
 		EXIT_IF(pipeline.descriptor_set_layout == nullptr);
 		if (pipeline.uses_push_descriptors) {
+			KYTY_PROFILER_BLOCK("CommitBindings::PushDescriptorSet");
 			vk_buffer.pushDescriptorSetKHR(pipeline_bind_point, pipeline.pipeline_layout, 0,
 			                               static_cast<uint32_t>(m_descriptor_writes.size()),
 			                               m_descriptor_writes.data());
 		} else {
+			KYTY_PROFILER_BLOCK("CommitBindings::UpdateDescriptorSets");
 			const auto set = m_context.GetDescriptorHeap().Commit(pipeline.descriptor_set_layout);
 			for (auto& write: m_descriptor_writes) {
 				write.dstSet = set;
