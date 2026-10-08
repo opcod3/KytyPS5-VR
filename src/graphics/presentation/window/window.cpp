@@ -778,7 +778,8 @@ void WindowContext::Run() {
 
 	constexpr uint64_t title_interval_ms = 1000;
 	auto               title_time        = SDL_GetTicks();
-	auto               title_frames      = loop.presented_frames.load(std::memory_order_relaxed);
+	auto               title_frames      = loop.guest_flips.load(std::memory_order_relaxed);
+	auto               title_hmd_frames  = loop.guest_hmd_flips.load(std::memory_order_relaxed);
 
 	while (!loop.need_exit) {
 		if (loop.paused.load(std::memory_order_acquire)) {
@@ -793,13 +794,19 @@ void WindowContext::Run() {
 		const auto now     = SDL_GetTicks();
 		const auto elapsed = now - title_time;
 		if (elapsed >= title_interval_ms) {
-			const auto frames = loop.presented_frames.load(std::memory_order_relaxed);
-			if (frames != 0) {
-				UpdateTitle(frames, static_cast<double>(frames - title_frames) * 1000.0 /
-				                        static_cast<double>(elapsed));
+			const auto frames     = loop.guest_flips.load(std::memory_order_relaxed);
+			const auto hmd_frames = loop.guest_hmd_flips.load(std::memory_order_relaxed);
+			// A guest flipping the headset reports its rate, even if it also flips the main port.
+			const bool hmd   = hmd_frames != title_hmd_frames;
+			const auto total = hmd ? hmd_frames : frames;
+			const auto shown = hmd ? hmd_frames - title_hmd_frames : frames - title_frames;
+			if (total != 0) {
+				UpdateTitle(total,
+				            static_cast<double>(shown) * 1000.0 / static_cast<double>(elapsed));
 			}
-			title_time   = now;
-			title_frames = frames;
+			title_time       = now;
+			title_frames     = frames;
+			title_hmd_frames = hmd_frames;
 		}
 		const auto wait_ms = static_cast<int>(title_interval_ms - (now - title_time));
 		if (!HostInputWaitEvent(&loop.event, wait_ms)) {

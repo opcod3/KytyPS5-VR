@@ -1443,6 +1443,7 @@ bool FlipQueue::Flip(uint32_t micros, bool headset) {
 	}
 	if (due) {
 		m_presenter.Present(std::span(layers.data(), count));
+		m_presenter.CountGuestFlip(headset);
 		// Marks a presented guest flip group so Tracy shows the real guest frame cadence, which is
 		// otherwise hidden behind the host present thread's fixed-rate mirror refresh. Tracy's
 		// FrameMark dereferences the profiler before its own guard, and with TRACY_DELAYED_INIT the

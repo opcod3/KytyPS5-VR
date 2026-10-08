@@ -1275,6 +1275,11 @@ void Presenter::Present(std::span<const Layer> layers) {
 	}
 }
 
+void Presenter::CountGuestFlip(bool headset) noexcept {
+	(headset ? m_impl->window.loop.guest_hmd_flips : m_impl->window.loop.guest_flips)
+	    .fetch_add(1, std::memory_order_relaxed);
+}
+
 void Presenter::ClearLayer(int bus) {
 	if (bus != HMD_BUS && static_cast<size_t>(bus) >= m_impl->layers.size()) {
 		return;
@@ -1340,7 +1345,6 @@ void Presenter::Impl::Present(const HmdMirror* mirror) {
 		}
 
 		presented_overlay_revision.store(overlay_visual.revision, std::memory_order_release);
-		window.loop.presented_frames.fetch_add(1, std::memory_order_relaxed);
 		return;
 	}
 	LOGF("Vulkan presentation retry exhausted; dropping frame\n");

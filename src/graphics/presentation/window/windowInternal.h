@@ -27,7 +27,9 @@ struct WindowLoopState {
 	SDL_Event        event {};
 	bool             need_exit = false;
 	std::atomic_bool paused    = false;
-	std::atomic<uint64_t> presented_frames {0};
+	// Presented guest flips, by output; the window's own refreshes (mirror, overlay) don't count.
+	std::atomic<uint64_t> guest_flips {0};
+	std::atomic<uint64_t> guest_hmd_flips {0};
 };
 
 // An additional output window presented with the main window's Vulkan device.

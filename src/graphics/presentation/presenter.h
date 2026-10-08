@@ -95,6 +95,8 @@ public:
 	[[nodiscard]] RenderContext& Renderer() const noexcept;
 	void                         Present(Frame& frame);
 	void                         Present(std::span<const Layer> layers);
+	// Feeds the window title's frame counter.
+	void                         CountGuestFlip(bool headset) noexcept;
 	void                         ClearLayer(int bus);
 	void                         Discard(Frame& frame);
 
