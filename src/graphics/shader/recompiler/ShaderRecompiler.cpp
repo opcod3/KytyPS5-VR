@@ -790,10 +790,8 @@ TranslateResult TranslateProgram(const Decoder::Program& decoded, const CompileO
 	     static_cast<uint64_t>(ir.blocks.size()), phase_ms());
 	IR::RewriteToSsa(ir.blocks);
 	// A stereo-expansion draw compiles one shared variant that reads the eye dynamically; a mono
-	// draw folds the eye to 0. The flag rides on whichever input info this stage carries.
-	const bool stereo =
-	    (options.input_info.pixel != nullptr && options.input_info.pixel->stereo) ||
-	    (options.input_info.vertex != nullptr && options.input_info.vertex->stereo);
+	// draw folds the eye to 0.
+	const bool stereo = ShaderIsStereoVariant(options.stage, options.input_info);
 	IR::ConstantPropagationPass(ir.blocks, ir.wave_size, stereo);
 	IR::ResolveControlFlowIdentities(ir);
 	IR::RemoveIdentities(ir.blocks);
@@ -882,9 +880,7 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 	IR::CollectShaderInfo(ir, options.input_info);
 	// A stereo-expansion variant reads the eye from PushData::StereoEyeDword at draw time, so it
 	// needs the push-constant block even when it has no shader data of its own.
-	ir.bindings.uses_stereo_eye =
-	    (options.input_info.pixel != nullptr && options.input_info.pixel->stereo) ||
-	    (options.input_info.vertex != nullptr && options.input_info.vertex->stereo);
+	ir.bindings.uses_stereo_eye = ShaderIsStereoVariant(ir.stage, options.input_info);
 	std::string ir_dump;
 	if (options.dump_ir) {
 		ir_dump = MakeIrDump(translated.cfg_dump, ir);

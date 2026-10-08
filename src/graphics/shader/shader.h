@@ -213,6 +213,16 @@ union ShaderStageInputInfo {
 	const ShaderComputeInputInfo* compute = nullptr;
 };
 
+// Whether this stage is the shared stereo-expansion variant. The input info is a union, so only
+// the member matching the stage may be read.
+inline bool ShaderIsStereoVariant(ShaderType stage, ShaderStageInputInfo input) {
+	switch (stage) {
+		case ShaderType::Vertex: return input.vertex != nullptr && input.vertex->stereo;
+		case ShaderType::Pixel: return input.pixel != nullptr && input.pixel->stereo;
+		default: return false;
+	}
+}
+
 inline const ShaderWorkgroupInputInfo* ShaderWorkgroupInput(ShaderType           stage,
                                                             ShaderStageInputInfo input) {
 	switch (stage) {
