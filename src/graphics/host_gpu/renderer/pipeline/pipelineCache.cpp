@@ -24,13 +24,16 @@
 #include <array>
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <fmt/format.h>
 #include <limits>
+#include <numeric>
 #include <span>
 #include <spirv-tools/libspirv.hpp>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 #include <xxhash.h>
@@ -223,6 +226,32 @@ struct PipelineCache::ProgramCache {
 		ShaderProgram                                handle;
 	};
 
+	struct RecordedRead {
+		uint64_t address = 0;
+		uint32_t offset  = 0; // First word in the owning word array.
+		uint32_t count   = 0;
+		bool     strict  = false;
+	};
+
+	// Guest memory a refresh read, coalesced into disjoint ranges per reader.
+	struct ReadRecord {
+		std::vector<RecordedRead> reads;
+		std::vector<uint32_t>     words;
+	};
+
+	// MaterializeResources is a pure function of the plan, the runtime inputs and the guest words
+	// it reads, so a refresh whose inputs and reads all still match reproduces the cached result.
+	struct MaterializedInputs {
+		bool                  valid       = false;
+		int64_t               invalid_reason = 1; // Diagnostic: why the last refresh was not kept.
+		uint64_t              shader_base = 0;
+		std::vector<uint32_t> user_data;
+		std::vector<uint32_t> workgroup_counts;
+		// Call-source reads are seeded into the snapshot rather than read through the runtime.
+		std::vector<std::pair<uint64_t, uint64_t>> source_reads;
+		ReadRecord            memory;
+	};
+
 	struct SourceEntry {
 		SourceEntry(ShaderRecompiler::IR::ResourcePlan plan,
 		            std::unique_ptr<ShaderRecompiler::ShaderSource> call_source)
@@ -244,19 +273,7 @@ struct PipelineCache::ProgramCache {
 		}
 
 		template <bool HasCalls>
-		Permutation* FindPermutation(const ShaderRecompiler::IR::SrtRuntime& runtime,
-		                             uint32_t push_data_cursor) {
-			{
-				KYTY_PROFILER_BLOCK("ProgramCache::MaterializeResources");
-				EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
-				    resource_plan, runtime, resources, specialization));
-				if (tracy::ProfilerAvailable()) {
-					TracyPlot("ProgramCache::SpecializationReads",
-					          static_cast<int64_t>(resources.specialization_reads.size()));
-					TracyPlot("ProgramCache::Permutations",
-					          static_cast<int64_t>(permutations.size()));
-				}
-			}
+		Permutation* FindPermutation(uint32_t push_data_cursor) {
 			KYTY_PROFILER_BLOCK("ProgramCache::FindPermutation");
 			for (auto& candidate: permutations) {
 				const auto& layout = candidate.program.bindings;
@@ -277,8 +294,206 @@ struct PipelineCache::ProgramCache {
 		ShaderRecompiler::IR::ResourcePlan           resource_plan;
 		ShaderRecompiler::IR::ResourceSnapshot       resources;
 		ShaderRecompiler::IR::ResourceSpecialization specialization;
+		MaterializedInputs                           materialized;
 		std::vector<Permutation>                    permutations;
 	};
+
+	struct ReadRecorder {
+		ReadRecord            record;
+		std::vector<uint32_t> order;
+		bool                  failed = false;
+		// Diagnostics: strict reader calls and the time spent inside them.
+		uint64_t              strict_reads = 0;
+		uint64_t              strict_ns    = 0;
+
+		void Reset() {
+			record.reads.clear();
+			record.words.clear();
+			failed       = false;
+			strict_reads = 0;
+			strict_ns    = 0;
+		}
+		void Record(uint64_t address, std::span<const uint32_t> values, bool strict) {
+			record.reads.push_back({.address = address,
+			                        .offset  = static_cast<uint32_t>(record.words.size()),
+			                        .count   = static_cast<uint32_t>(values.size()),
+			                        .strict  = strict});
+			record.words.insert(record.words.end(), values.begin(), values.end());
+		}
+	};
+
+	static bool RecordStrictRead(void* userdata, uint64_t address, std::span<uint32_t> values) {
+		auto&      recorder = *static_cast<ReadRecorder*>(userdata);
+		const auto begin    = std::chrono::steady_clock::now();
+		const bool read     = ReadShaderGuestMemory(nullptr, address, values);
+		recorder.strict_ns += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+		                                                std::chrono::steady_clock::now() - begin)
+		                                                .count());
+		recorder.strict_reads++;
+		if (!read) {
+			recorder.failed = true;
+			return false;
+		}
+		recorder.Record(address, values, true);
+		return true;
+	}
+
+	static bool RecordOrdinaryRead(void* userdata, uint64_t address, std::span<uint32_t> values) {
+		// Matches SrtWalker's fallback for a runtime without an ordinary reader.
+		std::memcpy(values.data(), reinterpret_cast<const void*>(address), values.size_bytes());
+		static_cast<ReadRecorder*>(userdata)->Record(address, values, false);
+		return true;
+	}
+
+	// Coalesces the recorded reads so a later check costs one read per contiguous range. Fails when
+	// overlapping reads disagree (the guest wrote during the refresh) or are not word aligned.
+	int64_t coalesce_failure = 0;
+
+	bool CoalesceReads(ReadRecord& out) {
+		const auto& in = recorder.record;
+		recorder.order.resize(in.reads.size());
+		std::iota(recorder.order.begin(), recorder.order.end(), 0u);
+		std::ranges::sort(recorder.order, [&](uint32_t a, uint32_t b) {
+			const auto& left  = in.reads[a];
+			const auto& right = in.reads[b];
+			return std::tie(left.strict, left.address) < std::tie(right.strict, right.address);
+		});
+		out.reads.clear();
+		out.words.clear();
+		for (const auto index: recorder.order) {
+			const auto& read  = in.reads[index];
+			const auto* words = in.words.data() + read.offset;
+			if ((read.address & 3u) != 0u) {
+				coalesce_failure = 3;
+				return false;
+			}
+			if (!out.reads.empty()) {
+				auto&          last = out.reads.back();
+				const uint64_t end  = last.address + uint64_t {last.count} * sizeof(uint32_t);
+				if (last.strict == read.strict && read.address <= end) {
+					const auto start   = static_cast<uint32_t>((read.address - last.address) / 4u);
+					const auto overlap = std::min(read.count, last.count - start);
+					if (!std::equal(words, words + overlap, out.words.begin() + last.offset + start)) {
+						coalesce_failure = 4;
+						return false;
+					}
+					out.words.insert(out.words.end(), words + overlap, words + read.count);
+					last.count += read.count - overlap;
+					continue;
+				}
+			}
+			out.reads.push_back({.address = read.address,
+			                     .offset  = static_cast<uint32_t>(out.words.size()),
+			                     .count   = read.count,
+			                     .strict  = read.strict});
+			out.words.insert(out.words.end(), words, words + read.count);
+		}
+		return true;
+	}
+
+	bool MaterializedInputsMatch(const MaterializedInputs&               inputs,
+	                             const ShaderRecompiler::IR::SrtRuntime& runtime) {
+		KYTY_PROFILER_FUNCTION();
+		const auto miss = [](int64_t reason) {
+			if (tracy::ProfilerAvailable()) {
+				TracyPlot("ProgramCache::MaterializeMiss", reason);
+			}
+			return false;
+		};
+		if (!inputs.valid) return miss(inputs.invalid_reason);
+		if (inputs.shader_base != runtime.shader_base) return miss(10);
+		if (!std::ranges::equal(inputs.user_data, runtime.user_data)) {
+			if (tracy::ProfilerAvailable() && inputs.user_data.size() == runtime.user_data.size()) {
+				int64_t changed = 0;
+				for (size_t i = 0; i < inputs.user_data.size(); i++) {
+					if (inputs.user_data[i] != runtime.user_data[i]) {
+						TracyPlot("ProgramCache::ChangedUserDataIndex", static_cast<int64_t>(i));
+						changed++;
+					}
+				}
+				TracyPlot("ProgramCache::ChangedUserDataWords", changed);
+			}
+			return miss(11);
+		}
+		if (!std::ranges::equal(inputs.workgroup_counts, runtime.workgroup_counts)) return miss(12);
+		for (const auto& read: inputs.memory.reads) {
+			const auto* saved = inputs.memory.words.data() + read.offset;
+			const auto  bytes = uint64_t {read.count} * sizeof(uint32_t);
+			if (!read.strict) {
+				if (std::memcmp(reinterpret_cast<const void*>(read.address), saved, bytes) != 0) {
+					return miss(13);
+				}
+				continue;
+			}
+			// The strict reader also synchronizes GPU-written bytes, as the original read did.
+			recheck_words.resize(read.count);
+			if (!ReadShaderGuestMemory(nullptr, read.address, recheck_words)) return miss(14);
+			if (!std::equal(recheck_words.begin(), recheck_words.end(), saved)) return miss(15);
+		}
+		if (tracy::ProfilerAvailable()) {
+			TracyPlot("ProgramCache::MaterializeMiss", int64_t {0});
+		}
+		return true;
+	}
+
+	bool Materialize(SourceEntry& entry, const ShaderRecompiler::IR::SrtRuntime& runtime) {
+		auto& inputs = entry.materialized;
+		if (entry.resource_plan.srt_code) {
+			// The compiled walker loads guest memory directly and only runs without an ordinary
+			// reader, so its reads cannot be recorded; it is cheap enough to rerun every time.
+			KYTY_PROFILER_BLOCK("ProgramCache::MaterializeResources(Compiled)");
+			inputs.valid = false;
+			return ShaderRecompiler::IR::MaterializeResources(entry.resource_plan, runtime,
+			                                                  entry.resources, entry.specialization);
+		}
+		if (inputs.source_reads == entry.resource_plan.source_reads &&
+		    MaterializedInputsMatch(inputs, runtime)) {
+			return true;
+		}
+		KYTY_PROFILER_BLOCK("ProgramCache::MaterializeResources");
+		inputs.valid = false;
+		recorder.Reset();
+		auto recording                       = runtime;
+		recording.userdata                   = &recorder;
+		recording.read_memory                = RecordOrdinaryRead;
+		recording.read_specialization_memory = RecordStrictRead;
+		if (!ShaderRecompiler::IR::MaterializeResources(entry.resource_plan, recording,
+		                                                entry.resources, entry.specialization)) {
+			return false;
+		}
+		if (tracy::ProfilerAvailable()) {
+			TracyPlot("Materialize::StrictReads", static_cast<int64_t>(recorder.strict_reads));
+			TracyPlot("Materialize::StrictReadNs", static_cast<int64_t>(recorder.strict_ns));
+			TracyPlot("Materialize::OrdinaryReads",
+			          static_cast<int64_t>(recorder.record.reads.size() - recorder.strict_reads));
+			TracyPlot("Materialize::ReadWords", static_cast<int64_t>(recorder.record.words.size()));
+		}
+		inputs.invalid_reason = recorder.failed ? 2 : 0;
+		if (!recorder.failed && !CoalesceReads(inputs.memory)) {
+			inputs.invalid_reason = coalesce_failure;
+		}
+		if (inputs.invalid_reason == 0) {
+			inputs.valid       = true;
+			inputs.shader_base = runtime.shader_base;
+			inputs.user_data.assign(runtime.user_data.begin(), runtime.user_data.end());
+			inputs.workgroup_counts.assign(runtime.workgroup_counts.begin(),
+			                               runtime.workgroup_counts.end());
+			inputs.source_reads = entry.resource_plan.source_reads;
+		}
+		return true;
+	}
+
+	template <bool HasCalls>
+	Permutation* MaterializeAndFind(SourceEntry& entry, const ShaderRecompiler::IR::SrtRuntime& runtime,
+	                                uint32_t push_data_cursor) {
+		EXIT_IF(!Materialize(entry, runtime));
+		if (tracy::ProfilerAvailable()) {
+			TracyPlot("ProgramCache::SpecializationReads",
+			          static_cast<int64_t>(entry.resources.specialization_reads.size()));
+			TracyPlot("ProgramCache::Permutations", static_cast<int64_t>(entry.permutations.size()));
+		}
+		return entry.FindPermutation<HasCalls>(push_data_cursor);
+	}
 
 	struct ProgramKeyHash {
 		std::size_t operator()(const ProgramKey& key) const {
@@ -365,9 +580,9 @@ struct PipelineCache::ProgramCache {
 			Permutation* permutation = nullptr;
 			if (cached.call_source) {
 				source_changed = cached.RefreshCallSource(runtime);
-				if (!source_changed) permutation = cached.FindPermutation<true>(runtime, push_data_cursor);
+				if (!source_changed) permutation = MaterializeAndFind<true>(cached, runtime, push_data_cursor);
 			} else {
-				permutation = cached.FindPermutation<false>(runtime, push_data_cursor);
+				permutation = MaterializeAndFind<false>(cached, runtime, push_data_cursor);
 			}
 			if (permutation != nullptr) {
 				input_info.stage = {.program = &permutation->program, .resources = &entry->second.resources};
@@ -437,12 +652,13 @@ struct PipelineCache::ProgramCache {
 			auto retained = source.call ? std::make_unique<ShaderRecompiler::ShaderSource>(std::move(source)) : nullptr;
 			entry = programs.try_emplace(lookup_key,
 			    ShaderRecompiler::IR::ExtractResourcePlan(translated.program), std::move(retained)).first;
-			EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
-			    entry->second.resource_plan, runtime, entry->second.resources,
-			    entry->second.specialization));
+			EXIT_IF(!Materialize(entry->second, runtime));
 		} else if (source_changed) {
 			entry->second.resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
-			if (const auto* permutation = entry->second.FindPermutation<true>(runtime, push_data_cursor)) {
+			entry->second.materialized.valid          = false;
+			entry->second.materialized.invalid_reason = 16; // Diagnostic: the plan was rebuilt.
+			if (const auto* permutation =
+			        MaterializeAndFind<true>(entry->second, runtime, push_data_cursor)) {
 				input_info.stage = {.program = &permutation->program, .resources = &entry->second.resources};
 				permutation->program.bindings.AdvancePushData(push_data_cursor);
 				return permutation->handle;
@@ -485,6 +701,8 @@ struct PipelineCache::ProgramCache {
 
 	std::unordered_map<ProgramKey, SourceEntry, ProgramKeyHash> programs;
 	ProgramKey                                                  lookup_key;
+	ReadRecorder                                                recorder;
+	std::vector<uint32_t>                                       recheck_words;
 	vk::Device                                                  device;
 	uint64_t                                                    next_shader_id = 0;
 };

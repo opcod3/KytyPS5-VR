@@ -1,6 +1,7 @@
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 
 #include "common/assert.h"
+#include "common/profiler.h"
 #include "graphics/guest_gpu/gpu_format.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
@@ -224,6 +225,7 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
                                    std::vector<DescriptorValue>& descriptors,
                                    std::vector<Specialization>&  specializations,
                                    uint32_t maximum_resources, Normalize&& normalize) {
+	KYTY_PROFILER_FUNCTION();
 	const auto  descriptor_bytes = dword_count * sizeof(uint32_t);
 	const auto& sources = indirect.sources;
 	const auto* selector = indirect.selector ? &*indirect.selector : nullptr;
@@ -1089,8 +1091,11 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	SrtWalker clean(program, CleanRuntime(observed));
 	SrtWalker walker(program, observed,
 	                 capture_reads || program.requires_specialization_memory ? &clean : nullptr);
-	if (!walker.RefreshFlatBuffer(snapshot.flattened_srt)) {
-		return false;
+	{
+		KYTY_PROFILER_BLOCK("Materialize::RefreshFlatBuffer");
+		if (!walker.RefreshFlatBuffer(snapshot.flattened_srt)) {
+			return false;
+		}
 	}
 	const auto active = std::span<const uint8_t>(program.active_sources);
 	snapshot.uniform_fill = {};
@@ -1119,6 +1124,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	snapshot.buffers.resize(program.info.buffers.size());
 	specialization.buffers.assign(program.info.buffers.size(), {});
 	for (uint32_t i = 0; i < snapshot.buffers.size(); ++i) {
+		KYTY_PROFILER_BLOCK("Materialize::Buffer");
 		const auto base_index =
 		    i < program.info.buffers.size() ? i : specialization.buffers[i].indirect_root;
 		if (base_index >= program.info.buffers.size()) return false;
@@ -1166,6 +1172,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	snapshot.images.resize(program.info.images.size());
 	specialization.images.resize(program.info.images.size());
 	for (uint32_t i = 0; i < program.info.images.size(); ++i) {
+		KYTY_PROFILER_BLOCK("Materialize::Image");
 		const auto& image = program.info.images[i];
 		specialization.images[i] = {
 		    .numeric_class = image.numeric_class,
@@ -1211,6 +1218,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	}
 	snapshot.samplers.resize(program.info.samplers.size());
 	for (uint32_t i = 0; i < program.info.samplers.size(); ++i) {
+		KYTY_PROFILER_BLOCK("Materialize::Sampler");
 		auto source = program.info.samplers[i].source;
 		if (source >= program.descriptor_sources.size()) return false;
 		const auto& descriptor = program.descriptor_sources[source];
@@ -1233,6 +1241,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		}
 	}
 	snapshot.user_data.assign(runtime.user_data.begin(), runtime.user_data.end());
+	KYTY_PROFILER_BLOCK("Materialize::BuildResourceSpecialization");
 	return BuildResourceSpecialization(program, snapshot, specialization);
 }
 
